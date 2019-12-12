@@ -54,3 +54,41 @@ except DistributionNotFound:
     __version__ = "unknown"
 finally:
     del get_distribution, DistributionNotFound
+
+
+import os as _os
+import subprocess as _subprocess
+
+
+def install_gt_sources():
+    GIT_BRANCH = "release_v1.1"
+    GIT_REPO = "https://github.com/GridTools/gridtools.git"
+
+    install_path = _os.path.dirname(__file__)
+    target_path = _os.path.abspath(_os.path.join(install_path, "_external_src", "gridtools"))
+
+    if not _os.path.exists(target_path):
+        git_cmd = f"git clone --depth 1 -b {GIT_BRANCH} {GIT_REPO} {target_path}"
+        print(f"Getting GridTools C++ sources...\n$ {git_cmd}")
+        _subprocess.check_call(git_cmd.split(), stderr=_subprocess.STDOUT)
+
+
+def remove_gt_sources():
+    install_path = _os.path.dirname(__file__)
+    target_path = _os.path.abspath(_os.path.join(install_path, "_external_src", "gridtools"))
+
+    if _os.path.exists(target_path):
+        rm_cmd = f"rm -Rf {target_path}"
+        print(f"Deleting sources...\n$ {rm_cmd}")
+        _subprocess.run(rm_cmd.split())
+
+
+try:
+    # Check if GridTools sources are installed
+    install_gt_sources()
+except Exception:
+    print(
+        f"Missing GridTools sources. Install them manually in '{_os.path.dirname(__file__)}/_external_src/'"
+    )
+finally:
+    del _os, _subprocess

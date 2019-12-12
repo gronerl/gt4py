@@ -500,13 +500,7 @@ class BaseGTBackend(gt_backend.BaseBackend):
     def build(cls, stencil_id, performance_ir, definition_func, options):
         cls._check_options(options)
 
-        # Generate the Python binary extension (checking if GridTools sources are installed)
-        if not os.path.isfile(
-            os.path.join(gt_config.GT_INCLUDE_PATH, "gridtools", "common", "defs.hpp")
-        ):
-            raise RuntimeError(
-                "Missing GridTools sources. Run 'python setup.py install_gt_sources'."
-            )
+        # Generate the Python binary extension
         pyext_module_name, pyext_file_path = cls.generate_extension(
             stencil_id, performance_ir, options
         )
