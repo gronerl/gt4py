@@ -483,7 +483,7 @@ class StencilTestSuite(metaclass=SuiteMeta):
                 name: tuple(
                     nb[0] - g
                     for nb, g in zip(
-                        new_boundary, implementation.field_info[name].boundary.lower_indices,
+                        new_boundary, implementation.field_info[name].boundary.lower_indices
                     )
                 )
                 for name in fields.keys()

@@ -168,6 +168,10 @@ class Storage(np.ndarray):
     def layout_map(self):
         return gt_backend.from_name(self.backend).storage_info["layout_map"](self.mask)
 
+    @property
+    def _alignment(self):
+        return gt_backend.from_name(self.backend).storage_info["alignment"]
+
     def transpose(self, *axes):
         res = super().transpose(*axes)
         if res._is_consistent(self):
@@ -315,6 +319,100 @@ class GPUStorage(Storage):
     def _set_device_modified(self):
         pass
 
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+
+        out = kwargs.get("out", None)
+        dtype = kwargs.get("dtype", None)
+
+        if not ufunc.nin == 2 or not ufunc.nout == 1:
+            return NotImplemented
+        if out is not None and not isinstance(out, tuple):
+            raise TypeError("'out' must be tuple")
+        if isinstance(out, tuple) and not len(out) == ufunc.nout:
+            raise ValueError("wrong number of output arguments")
+        if method == "__call__" and not len(inputs) == ufunc.nin:
+            raise ValueError("wrong number of input arguments")
+        if "axis" in kwargs:
+            return NotImplemented
+
+        assert self in inputs
+        other = [i for i in inputs if i is not self][0]
+
+        inputs = tuple(x._array if isinstance(x, CPUStorage) else x for x in inputs)
+
+        # pre-allocate output buffer with dtype according to numpy type casting rules
+        if not out:
+            if dtype is None:
+                # infer numpy output dtypes
+                in_type_strs = tuple(
+                    i.dtype.char if hasattr(i, "dtype") else np.dtype(type(i)).char for i in inputs
+                )
+                ufunc_in_type_strs = {
+                    tuple(c for c in t.split("->")[0]): tuple(c for c in t.split("->")[1])
+                    for t in ufunc.types
+                }
+                out_types = None
+                if in_type_strs in ufunc_in_type_strs:
+                    out_types = [np.dtype(c) for c in ufunc_in_type_strs[in_type_strs]]
+                else:
+                    for ufunc_in_ts in ufunc.types:
+                        casting = kwargs.get("casting", "same_kind")
+                        if all(
+                            [
+                                np.can_cast(i_t, u_t, casting)
+                                for i_t, u_t in zip(in_type_strs, ufunc_in_ts.split("->")[0])
+                            ]
+                        ):
+                            out_types = [np.dtype(c) for c in ufunc_in_ts.split("->")[1]]
+                            break
+                if out_types is None:
+                    return NotImplemented
+            else:
+                # out_types =
+                pass
+
+            # allocate
+            out = tuple(
+                ExplicitlySyncedGPUStorage(
+                    shape=self.shape,
+                    dtype=self.dtype,
+                    backend=self.backend,
+                    default_origin=self.default_origin,
+                    mask=self.mask,
+                )
+                for t in out_types
+            )
+
+        # result = getattr(ufunc, method)(*inputs, **kwargs)
+
+        if isinstance(other, ExplicitlySyncedGPUStorage):
+            if other._is_clean or other._is_device_modified:
+                kwargs["out"] = tuple(cp.asarray(o) for o in out)
+                result = cp.asarray(self).__array_ufunc__(
+                    ufunc, method, *tuple(cp.asarray(i) for i in inputs), **kwargs
+                )
+            else:
+                kwargs["out"] = tuple(np.asarray(o) for o in out)
+                result = super().__array_ufunc__(
+                    ufunc, method, *tuple(np.asarray(i) for i in inputs), **kwargs
+                )
+        elif hasattr(other, "__cuda_array_interface__"):
+            kwargs["out"] = tuple(cp.asarray(o) for o in out)
+            result = cp.asarray(self).__array_ufunc__(
+                ufunc, method, *tuple(cp.asarray(i) for i in inputs), **kwargs
+            )
+        else:
+            kwargs["out"] = tuple(np.asarray(o) for o in out)
+            result = super().__array_ufunc__(
+                ufunc, method, *tuple(np.asarray(i) for i in inputs), **kwargs
+            )
+
+        assert all(
+            r is o
+            for r, o in zip(result if isinstance(result, tuple) else (result,), kwargs["out"])
+        )
+        return out if len(out) > 1 else out[0]
+
 
 class CPUStorage(Storage):
     @property
@@ -350,6 +448,81 @@ class CPUStorage(Storage):
         res = super().__deepcopy__(memo=memo)
         res[...] = self
         return res
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+
+        out = kwargs.get("out", None)
+        dtype = kwargs.get("dtype", None)
+
+        if not ufunc.nin == 2 or not ufunc.nout == 1:
+            return NotImplemented
+        if out is not None and not isinstance(out, tuple):
+            raise TypeError("'out' must be tuple")
+        if isinstance(out, tuple) and not len(out) == ufunc.nout:
+            raise ValueError("wrong number of output arguments")
+        if method == "__call__" and not len(inputs) == ufunc.nin:
+            raise ValueError("wrong number of input arguments")
+        if "axis" in kwargs:
+            return NotImplemented
+
+        assert self in inputs
+        other = [i for i in inputs if i is not self][0]
+
+        inputs = tuple(x._array if isinstance(x, CPUStorage) else x for x in inputs)
+
+        # pre-allocate output buffer with dtype according to numpy type casting rules
+        if not out:
+            if dtype is None:
+                # infer numpy output dtypes
+                in_type_strs = tuple(
+                    i.dtype.char if hasattr(i, "dtype") else np.dtype(type(i)).char for i in inputs
+                )
+                ufunc_in_type_strs = {
+                    tuple(c for c in t.split("->")[0]): tuple(c for c in t.split("->")[1])
+                    for t in ufunc.types
+                }
+                out_types = None
+                if in_type_strs in ufunc_in_type_strs:
+                    out_types = [np.dtype(c) for c in ufunc_in_type_strs[in_type_strs]]
+                else:
+                    for ufunc_in_ts in ufunc.types:
+                        casting = kwargs.get("casting", "same_kind")
+                        if all(
+                            [
+                                np.can_cast(i_t, u_t, casting)
+                                for i_t, u_t in zip(in_type_strs, ufunc_in_ts.split("->")[0])
+                            ]
+                        ):
+                            out_types = [np.dtype(c) for c in ufunc_in_ts.split("->")[1]]
+                            break
+                if out_types is None:
+                    return NotImplemented
+            else:
+                # out_types =
+                pass
+
+            # allocate
+            out = tuple(
+                ExplicitlySyncedGPUStorage(
+                    shape=self.shape,
+                    dtype=self.dtype,
+                    backend=self.backend,
+                    default_origin=self.default_origin,
+                    mask=self.mask,
+                )
+                for t in out_types
+            )
+
+        kwargs["out"] = tuple(np.asarray(o) for o in out)
+        result = super().__array_ufunc__(
+            ufunc, method, *tuple(np.asarray(i) for i in inputs), **kwargs
+        )
+
+        assert all(
+            r is o
+            for r, o in zip(result if isinstance(result, tuple) else (result,), kwargs["out"])
+        )
+        return out if len(out) > 1 else out[0]
 
 
 class ExplicitlySyncedGPUStorage(Storage):
@@ -524,80 +697,140 @@ class ExplicitlySyncedGPUStorage(Storage):
         return res
 
     @property
+    def __array_interface__(self):
+        self.device_to_host()
+        return super().__array_interface__
+
+    @property
     def __cuda_array_interface__(self):
         self.host_to_device()
         res = self._device_field.__cuda_array_interface__
         res["strides"] = self.strides
         return res
 
-    def _call_inplace(self, fname, other):
+    def __array_function__(self, *args, **kwargs):
+        self.synchronize()
+        return NotImplemented
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+
+        out = kwargs.get("out", None)
+        dtype = kwargs.get("dtype", None)
+
+        if not ufunc.nin == 2 or not ufunc.nout == 1:
+            return NotImplemented
+        if out is not None and not isinstance(out, tuple):
+            raise TypeError("'out' must be tuple")
+        if isinstance(out, tuple) and not len(out) == ufunc.nout:
+            raise ValueError("wrong number of output arguments")
+        if method == "__call__" and not len(inputs) == ufunc.nin:
+            raise ValueError("wrong number of input arguments")
+        if "axis" in kwargs:
+            return NotImplemented
+
+        assert self in inputs
+        other = [i for i in inputs if i is not self][0]
+
+        inputs = tuple(x._array if isinstance(x, CPUStorage) else x for x in inputs)
+
+        # pre-allocate output buffer with dtype according to numpy type casting rules
+        if not out:
+            if dtype is None:
+                # infer numpy output dtypes
+                in_type_strs = tuple(
+                    i.dtype.char if hasattr(i, "dtype") else np.dtype(type(i)).char for i in inputs
+                )
+                ufunc_in_type_strs = {
+                    tuple(c for c in t.split("->")[0]): tuple(c for c in t.split("->")[1])
+                    for t in ufunc.types
+                }
+                out_types = None
+                if in_type_strs in ufunc_in_type_strs:
+                    out_types = [np.dtype(c) for c in ufunc_in_type_strs[in_type_strs]]
+                else:
+                    for ufunc_in_ts in ufunc.types:
+                        casting = kwargs.get("casting", "same_kind")
+                        if all(
+                            [
+                                np.can_cast(i_t, u_t, casting)
+                                for i_t, u_t in zip(in_type_strs, ufunc_in_ts.split("->")[0])
+                            ]
+                        ):
+                            out_types = [np.dtype(c) for c in ufunc_in_ts.split("->")[1]]
+                            break
+                if out_types is None:
+                    return NotImplemented
+            else:
+                # out_types =
+                pass
+
+            # allocate
+            out = tuple(
+                ExplicitlySyncedGPUStorage(
+                    shape=self.shape,
+                    dtype=self.dtype,
+                    backend=self.backend,
+                    default_origin=self.default_origin,
+                    mask=self.mask,
+                )
+                for t in out_types
+            )
+
+        # result = getattr(ufunc, method)(*inputs, **kwargs)
+
         if isinstance(other, ExplicitlySyncedGPUStorage):
             if (self._is_clean or self._is_device_modified) and (
                 other._is_clean or other._is_device_modified
             ):
                 self._set_device_modified()
-                getattr(self._device_field, fname)(other)
-                return self
+
+                kwargs["out"] = tuple(cp.asarray(o) for o in out)
+                result = self._device_field.__array_ufunc__(
+                    ufunc, method, *tuple(cp.asarray(i) for i in inputs), **kwargs
+                )
             elif (self._is_clean or self._is_host_modified) and (
                 other._is_clean or other._is_host_modified
             ):
                 self._set_host_modified()
-                return getattr(super(), fname)(other)
+
+                kwargs["out"] = tuple(np.asarray(o) for o in out)
+                result = super().__array_ufunc__(
+                    ufunc, method, *tuple(np.asarray(i) for i in inputs), **kwargs
+                )
             else:
                 if self._is_host_modified:
                     self.host_to_device()
                 else:
                     other.host_to_device()
                 self._set_device_modified()
-                getattr(self._device_field, fname)(other)
-                return self
+                kwargs["out"] = tuple(cp.asarray(o) for o in out)
+                result = self._device_field.__array_ufunc__(
+                    ufunc, method, *tuple(cp.asarray(i) for i in inputs), **kwargs
+                )
         elif hasattr(other, "__cuda_array_interface__"):
             if self._is_host_modified:
                 self.host_to_device()
             self._set_device_modified()
-            getattr(self._device_field, fname)(other)
-            return self
+
+            kwargs["out"] = tuple(cp.asarray(o) for o in out)
+            result = self._device_field.__array_ufunc__(
+                ufunc, method, *tuple(cp.asarray(i) for i in inputs), **kwargs
+            )
         else:
             if self._is_device_modified:
                 self.device_to_host()
             self._set_host_modified()
-            return getattr(super(), fname)(other)
 
-    def __iadd__(self, other):
-        return self._call_inplace("__iadd__", other)
+            kwargs["out"] = tuple(np.asarray(o) for o in out)
+            result = super().__array_ufunc__(
+                ufunc, method, *tuple(np.asarray(i) for i in inputs), **kwargs
+            )
 
-    def __iand__(self, other):
-        return self._call_inplace("__iand__", other)
-
-    def __ifloordiv__(self, other):
-        return self._call_inplace("__ifloordiv__", other)
-
-    def __ilshift__(self, other):
-        return self._call_inplace("__ilshift__", other)
-
-    def __imod__(self, other):
-        return self._call_inplace("__imod__", other)
-
-    def __imul__(self, other):
-        return self._call_inplace("__imul__", other)
-
-    def __ior__(self, other):
-        return self._call_inplace("__ior__", other)
-
-    def __ipow__(self, other):
-        return self._call_inplace("__ipow__", other)
-
-    def __irshift__(self, other):
-        return self._call_inplace("__irshift__", other)
-
-    def __isub__(self, other):
-        return self._call_inplace("__isub__", other)
-
-    def __itruediv__(self, other):
-        return self._call_inplace("__itruediv__", other)
-
-    def __ixor__(self, other):
-        return self._call_inplace("__ixor__", other)
+        assert all(
+            r is o
+            for r, o in zip(result if isinstance(result, tuple) else (result,), kwargs["out"])
+        )
+        return out if len(out) > 1 else out[0]
 
 
 class _ViewableNdarray(np.ndarray):
