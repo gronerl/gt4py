@@ -22,13 +22,14 @@ import pprint
 from gt4py import ir as gt_ir
 from gt4py.analysis import TransformData
 from .passes import (
-    InitInfoPass,
-    NormalizeBlocksPass,
-    MergeBlocksPass,
-    ComputeExtentsPass,
     BuildIIRPass,
-    DataTypePass,
+    ComputeExtentsPass,
     ComputeUsedSymbolsPass,
+    DataTypePass,
+    InitInfoPass,
+    MergeBlocksPass,
+    MinifyTemporaryFieldNamesPass,
+    NormalizeBlocksPass,
 )
 
 
@@ -109,6 +110,9 @@ class IRTransformer:
         # Fill in missing dtypes
         data_type_pass = DataTypePass()
         data_type_pass.apply(self.transform_data)
+
+        minify_temporary_fields_pass = MinifyTemporaryFieldNamesPass()
+        minify_temporary_fields_pass.apply(self.transform_data)
 
         if options.build_info is not None:
             options.build_info["def_ir"] = self.transform_data.definition_ir

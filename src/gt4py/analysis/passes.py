@@ -865,3 +865,50 @@ class BuildIIRPass(TransformPass):
         result = gt_ir.AxisInterval(start=axis_bounds[0], end=axis_bounds[1])
 
         return result
+
+
+class MinifyTemporaryFieldNamesPass(TransformPass):
+    class RenameTemporaries(gt_ir.IRNodeVisitor):
+        def __call__(self, node):
+            assert isinstance(node, gt_ir.StencilImplementation)
+            self.name_map = dict()
+            self.visit(node)
+
+        def visit_StencilImplementation(self, node: gt_ir.StencilImplementation):
+            for i, name in enumerate(node.temporary_fields):
+                self.name_map[name] = f"__tmp_{i}"
+
+            self.generic_visit(node)
+
+            for old_name, new_name in self.name_map.items():
+                node.fields[new_name] = node.fields[old_name]
+                node.fields.pop(old_name)
+                node.fields_extents[new_name] = node.fields_extents[old_name]
+                node.fields_extents.pop(old_name)
+
+            unreferenced = []
+            for name in node.unreferenced:
+                unreferenced.append(self.name_map[name] if name in self.name_map else name)
+
+            print()
+
+        def visit_FieldAccessor(self, node: gt_ir.FieldAccessor):
+            if node.symbol in self.name_map:
+                node.symbol = self.name_map[node.symbol]
+
+        def visit_FieldDecl(self, node: gt_ir.FieldDecl):
+            if node.name in self.name_map:
+                node.name = self.name_map[node.name]
+
+        def visit_FieldRef(self, node: gt_ir.FieldRef):
+            if node.name in self.name_map:
+                node.name = self.name_map[node.name]
+
+        def visit_FieldDecl(self, node: gt_ir.FieldDecl):
+            if node.name in self.name_map:
+                node.name = self.name_map[node.name]
+
+    def apply(self, transform_data: TransformData):
+        collect_data_type = self.RenameTemporaries()
+        collect_data_type(transform_data.implementation_ir)
+        return transform_data
