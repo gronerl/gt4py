@@ -763,9 +763,7 @@ class BuildIIRPass(TransformPass):
                 for ij_block in block.ij_blocks
             ]
             multi_stage = gt_ir.MultiStage(
-                name="multi_stage__{}".format(block.id),
-                iteration_order=block.iteration_order,
-                groups=groups,
+                name="_ms{}".format(block.id), iteration_order=block.iteration_order, groups=groups
             )
             self.iir.multi_stages.append(multi_stage)
 
@@ -813,7 +811,7 @@ class BuildIIRPass(TransformPass):
             accessors.append(self._make_accessor(name, zero_extent, True))
 
         stage = gt_ir.Stage(
-            name="stage__{}".format(ij_block.id),
+            name="_s{}".format(ij_block.id),
             accessors=accessors,
             apply_blocks=apply_blocks,
             compute_extent=ij_block.compute_extent,
@@ -876,7 +874,7 @@ class MinifyTemporaryFieldNamesPass(TransformPass):
 
         def visit_StencilImplementation(self, node: gt_ir.StencilImplementation):
             for i, name in enumerate(node.temporary_fields):
-                self.name_map[name] = f"__tmp_{i}"
+                self.name_map[name] = f"_{i}"
 
             self.generic_visit(node)
 
