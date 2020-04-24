@@ -415,9 +415,9 @@ pyext_module = gt_utils.make_module_from_file("{pyext_module_name}", "{pyext_fil
 
         source = """
 # Load or generate a GTComputation object for the current domain size
-pyext_module.run_computation(list(_domain_), {run_args}, exec_info)
+pyext_module.run_computation(list(_domain_){run_args}, exec_info)
 """.format(
-            run_args=", ".join(args)
+            run_args=(", " if args else "") + ", ".join(args)
         )
         if self.backend_name == "gtcuda":
             source = (
