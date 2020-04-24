@@ -115,14 +115,12 @@ void run_computation(const std::array<gt::uint_t, 3>& domain
 PYBIND11_MODULE({{ module_name }}, m) {
     m.def("run_computation", &run_computation, "Runs the given computation",
           py::arg("domain"),
-{% if arg_fields%}
+{% if arg_fields or parameters%}
     {%- for field in arg_fields -%}
-              , py::arg("{{ field.name }}") {{- comma() }} py::arg("{{ field.name }}_origin") {{- zero_origin }}
+              py::arg("{{ field.name }}"), py::arg("{{ field.name }}_origin") {{- zero_origin }},
     {%- endfor -%}
-{% endif %}
-{% if parameters %}
     {%- for param in parameters -%}
-            , py::arg("{{ param.name }}")
+            py::arg("{{ param.name }}"),
     {%- endfor -%}
 {% endif %} py::arg("exec_info"));
 
