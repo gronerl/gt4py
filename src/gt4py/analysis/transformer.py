@@ -26,6 +26,7 @@ from .passes import (
     ComputeExtentsPass,
     ComputeUsedSymbolsPass,
     DataTypePass,
+    DemoteLocalTemporariesToVariablesPass,
     InitInfoPass,
     MergeBlocksPass,
     MinifyTemporaryFieldNamesPass,
@@ -113,6 +114,9 @@ class IRTransformer:
 
         minify_temporary_fields_pass = MinifyTemporaryFieldNamesPass()
         minify_temporary_fields_pass.apply(self.transform_data)
+
+        demote_local_temporaries_to_variables_pass = DemoteLocalTemporariesToVariablesPass()
+        demote_local_temporaries_to_variables_pass.apply(self.transform_data)
 
         if options.build_info is not None:
             options.build_info["def_ir"] = self.transform_data.definition_ir
