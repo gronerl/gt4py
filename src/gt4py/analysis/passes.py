@@ -919,7 +919,26 @@ class DemoteLocalTemporariesToVariablesPass(TransformPass):
         def visit_Stage(self, path: tuple, node_name: str, node: gt_ir.Stage):
             self.generic_visit(path, node_name, node)
             node.accessors = [a for a in node.accessors if a.symbol not in self.demotables]
-            return True, node
+            if node.accessors:
+                return True, node
+            else:
+                return False, None
+
+        def visit_StageGroup(self, path: tuple, node_name: str, node: gt_ir.StageGroup):
+            self.generic_visit(path, node_name, node)
+
+            if node.stages:
+                return True, node
+            else:
+                return False, None
+
+        def visit_MultiStage(self, path: tuple, node_name: str, node: gt_ir.MultiStage):
+            self.generic_visit(path, node_name, node)
+
+            if node.groups:
+                return True, node
+            else:
+                return False, None
 
         # def visit_FieldAccessor(self, path: tuple, node_name: str, node: gt_ir.FieldAccessor):
         #     if node.symbol in self.demotables:
