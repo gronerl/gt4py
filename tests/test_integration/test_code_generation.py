@@ -88,9 +88,3 @@ def test_stage_without_effect(backend):
     def definition(field_a: gtscript.Field[np.float_]):
         with computation(PARALLEL), interval(...):
             field_c = 0.0
-            field_a = field_c
-
-    @gtscript.stencil(backend=backend)
-    def definition(field_a: gtscript.Field[np.float_]):
-        with computation(PARALLEL), interval(...):
-            field_c = 0.0
