@@ -215,6 +215,15 @@ class CUDABuildExtension(build_ext, object):
         self.compiler._compile = original_compile
 
 
+def get_cuda_compute_capability():
+    try:
+        import cupy as cp
+
+        return cp.cuda.Device(0).compute_capability
+    except:
+        return None
+
+
 def get_cuda_compiler_key(compiler):
     try:
         import subprocess
@@ -222,13 +231,17 @@ def get_cuda_compiler_key(compiler):
         version_output = subprocess.check_output([f"{compiler}", "--version"])
     except Exception:
         version_output = ""
+    if isinstance(version_output, bytes):
+        version_output = version_output.decode("ascii")
     version_output = version_output.lower()
-    if b"nvcc" in version_output:
+    if "nvcc" in version_output:
         return "nvcc"
-    elif b"clang" in version_output:
+    elif "clang" in version_output:
         return "clang"
     else:
-        raise EnvironmentError("could not determine wether CUDA compiler is nvcc or clang")
+        raise EnvironmentError(
+            f"could not determine whether CUDA compiler '{compiler}' is nvcc or clang"
+        )
 
 
 def build_gtcuda_ext(
@@ -263,6 +276,12 @@ def build_gtcuda_ext(
 
     cuda_compiler = gt_config.build_settings["cuda_compiler"]
 
+    cuda_compiler_key = get_cuda_compiler_key(cuda_compiler)
+    compute_capability = get_cuda_compute_capability()
+    if cuda_compiler_key == "clang" and compute_capability is None:
+        raise EnvironmentError(
+            "could not determine compute capability of GPU, which is needed for compilation with clang"
+        )
     cuda_compile_args = {
         "nvcc": [
             "-std=c++14",
@@ -276,6 +295,11 @@ def build_gtcuda_ext(
             "-fPIC",
             "--compiler-options",
             "-fvisibility=hidden",
+            *(
+                ["-arch=sm_{}".format(compute_capability)]
+                if compute_capability is not None
+                else []
+            ),
             *cuda_extra_compile_args_from_config,
         ],
         "clang": [
@@ -291,7 +315,7 @@ def build_gtcuda_ext(
             "-fvisibility=hidden",
             "-pthread",
             "-xcuda",
-            "--cuda-gpu-arch=sm_60",
+            "--cuda-gpu-arch=sm_{}".format(compute_capability),
             "--cuda-path={}".format(gt_config.build_settings["cuda_root"]),
             *cuda_extra_compile_args_from_config,
         ],
