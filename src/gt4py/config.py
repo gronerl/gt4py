@@ -26,6 +26,11 @@ CUDA_ROOT = os.environ.get(
     "CUDA_HOME", os.environ.get("CUDA_PATH", os.path.abspath("/usr/local/cuda"))
 )
 
+CUDACXX = os.environ.get(
+    "CUDACXX", os.environ.get("CUDACC", os.path.join(CUDA_ROOT, "bin", "nvcc"))
+)
+
+
 GT_REPO_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "_external_src", "gridtools")
 )
@@ -34,6 +39,8 @@ GT_INCLUDE_PATH = os.path.abspath(os.path.join(GT_REPO_PATH, "include"))
 
 build_settings = {
     "boost_include_path": os.path.join(BOOST_ROOT, "include"),
+    "cuda_root": CUDA_ROOT,
+    "cuda_compiler": CUDACXX,
     "cuda_bin_path": os.path.join(CUDA_ROOT, "bin"),
     "cuda_include_path": os.path.join(CUDA_ROOT, "include"),
     "cuda_library_path": os.path.join(CUDA_ROOT, "lib64"),

@@ -182,7 +182,7 @@ def build_gtcpu_ext(
 
 class CUDABuildExtension(build_ext, object):
     # Refs:
-    #   - https://github.com/pytorch/pytorch/torch/utils/cpp_extension.py
+    #   - https://github.com/pytorch/pytorch/blob/master/torch/utils/cpp_extension.py
     #   - https://github.com/rmcgibbo/npcuda-example/blob/master/cython/setup.py
     #
     def build_extensions(self):
@@ -192,16 +192,16 @@ class CUDABuildExtension(build_ext, object):
         # Save references to the original methods
         original_compile = self.compiler._compile
 
-        def nvcc_compile(obj, src, ext, cc_args, extra_postargs, pp_opts):
+        def cuda_compile(obj, src, ext, cc_args, extra_postargs, pp_opts):
             original_compiler_so = self.compiler.compiler_so
             # Copy before we make any modifications.
             cflags = copy.deepcopy(extra_postargs)
             try:
                 if os.path.splitext(src)[-1] == ".cu":
-                    nvcc_exec = os.path.join(gt_config.build_settings["cuda_bin_path"], "nvcc")
-                    self.compiler.set_executable("compiler_so", [nvcc_exec])
+                    cudacxx_exec = gt_config.build_settings["cuda_compiler"]
+                    self.compiler.set_executable("compiler_so", [cudacxx_exec])
                     if isinstance(cflags, dict):
-                        cflags = cflags["nvcc"]
+                        cflags = cflags["cuda"]
                 elif isinstance(cflags, dict):
                     cflags = cflags["cxx"]
 
@@ -210,9 +210,25 @@ class CUDABuildExtension(build_ext, object):
                 # Put the original compiler back in place.
                 self.compiler.set_executable("compiler_so", original_compiler_so)
 
-        self.compiler._compile = nvcc_compile
+        self.compiler._compile = cuda_compile
         build_ext.build_extensions(self)
         self.compiler._compile = original_compile
+
+
+def get_cuda_compiler_key(compiler):
+    try:
+        import subprocess
+
+        version_output = subprocess.check_output([f"{compiler}", "--version"])
+    except Exception:
+        version_output = ""
+    version_output = version_output.lower()
+    if b"nvcc" in version_output:
+        return "nvcc"
+    elif b"clang" in version_output:
+        return "clang"
+    else:
+        raise EnvironmentError("could not determine wether CUDA compiler is nvcc or clang")
 
 
 def build_gtcuda_ext(
@@ -240,55 +256,79 @@ def build_gtcuda_ext(
     extra_compile_args_from_config = gt_config.build_settings["extra_compile_args"]
     if isinstance(extra_compile_args_from_config, dict):
         cxx_extra_compile_args_from_config = extra_compile_args_from_config["cxx"]
-        nvcc_extra_compile_args_from_config = extra_compile_args_from_config["nvcc"]
+        cuda_extra_compile_args_from_config = extra_compile_args_from_config["cuda"]
     else:
         cxx_extra_compile_args_from_config = extra_compile_args_from_config
-        nvcc_extra_compile_args_from_config = extra_compile_args_from_config
+        cuda_extra_compile_args_from_config = extra_compile_args_from_config
 
-    extra_compile_args = {
-        "cxx": [
-            "-std=c++14",
-            "-fvisibility=hidden",
-            "-fopenmp",
-            "-isystem{}".format(gt_config.build_settings["gt_include_path"]),
-            "-isystem{}".format(gt_config.build_settings["boost_include_path"]),
-            "-DBOOST_PP_VARIADICS",
-            "-fPIC",
-            *cxx_extra_compile_args_from_config,
-        ],
+    cuda_compiler = gt_config.build_settings["cuda_compiler"]
+
+    cuda_compile_args = {
         "nvcc": [
             "-std=c++14",
-            "-isystem={}".format(gt_config.build_settings["gt_include_path"]),
-            "-isystem={}".format(gt_config.build_settings["boost_include_path"]),
             "-DBOOST_PP_VARIADICS",
             "-DBOOST_OPTIONAL_CONFIG_USE_OLD_IMPLEMENTATION_OF_OPTIONAL",
             "-DBOOST_OPTIONAL_USE_OLD_DEFINITION_OF_NONE",
+            "-isystem={}".format(gt_config.build_settings["gt_include_path"]),
+            "-isystem={}".format(gt_config.build_settings["boost_include_path"]),
             "--expt-relaxed-constexpr",
             "--compiler-options",
             "-fPIC",
             "--compiler-options",
             "-fvisibility=hidden",
-            *nvcc_extra_compile_args_from_config,
+            *cuda_extra_compile_args_from_config,
         ],
+        "clang": [
+            "-std=c++14",
+            "-isystem",
+            "{}".format(gt_config.build_settings["gt_include_path"]),
+            "-isystem",
+            "{}".format(gt_config.build_settings["boost_include_path"]),
+            "-DBOOST_PP_VARIADICS",
+            "-DBOOST_OPTIONAL_CONFIG_USE_OLD_IMPLEMENTATION_OF_OPTIONAL",
+            "-DBOOST_OPTIONAL_USE_OLD_DEFINITION_OF_NONE",
+            "-fPIC",
+            "-fvisibility=hidden",
+            "-pthread",
+            "-xcuda",
+            "--cuda-gpu-arch=sm_60",
+            "--cuda-path={}".format(gt_config.build_settings["cuda_root"]),
+            *cuda_extra_compile_args_from_config,
+        ],
+    }
+    extra_compile_args = {
+        "cxx": [
+            "-std=c++14",
+            "-fvisibility=hidden",
+            "-fopenmp",
+            "-isystem",
+            "{}".format(gt_config.build_settings["gt_include_path"]),
+            "-isystem",
+            "{}".format(gt_config.build_settings["boost_include_path"]),
+            "-DBOOST_PP_VARIADICS",
+            "-fPIC",
+            *cxx_extra_compile_args_from_config,
+        ],
+        "cuda": cuda_compile_args[get_cuda_compiler_key(cuda_compiler)],
     }
 
     extra_link_args = [*gt_config.build_settings["extra_link_args"]]
 
     if debug_mode:
         debug_flags = ["-O0", "-ggdb"]
-        extra_compile_args["cxx"].extend(debug_flags)
-        extra_compile_args["nvcc"].extend(debug_flags)
+        for key in extra_compile_args:
+            extra_compile_args[key].extend(debug_flags)
         extra_link_args.extend(debug_flags)
     else:
         release_flags = ["-O3", "-DNDEBUG"]
-        extra_compile_args["cxx"].extend(release_flags)
-        extra_compile_args["nvcc"].extend(release_flags)
+        for key in extra_compile_args:
+            extra_compile_args[key].extend(release_flags)
         extra_link_args.extend(release_flags)
 
     if add_profile_info:
         profile_flags = ["-pg"]
-        extra_compile_args["cxx"].extend(profile_flags)
-        extra_compile_args["nvcc"].extend(profile_flags)
+        for key in extra_compile_args:
+            extra_compile_args[key].extend(profile_flags)
         extra_link_args.extend(profile_flags)
 
     return build_pybind_ext(
