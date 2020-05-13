@@ -264,6 +264,7 @@ def build_gtcuda_ext(
             "-DBOOST_OPTIONAL_CONFIG_USE_OLD_IMPLEMENTATION_OF_OPTIONAL",
             "-DBOOST_OPTIONAL_USE_OLD_DEFINITION_OF_NONE",
             "--expt-relaxed-constexpr",
+            "--disable-warnings", # workaround for 'catastrophic failure' error in tasmania
             "--compiler-options",
             "-fPIC",
             "--compiler-options",
