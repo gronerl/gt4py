@@ -291,6 +291,7 @@ def build_gtcuda_ext(
             "-isystem={}".format(gt_config.build_settings["gt_include_path"]),
             "-isystem={}".format(gt_config.build_settings["boost_include_path"]),
             "--expt-relaxed-constexpr",
+            "--disable-warnings", # workaround for 'catastrophic failure' error in tasmania
             "--compiler-options",
             "-fPIC",
             "--compiler-options",
