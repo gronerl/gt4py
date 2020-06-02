@@ -208,12 +208,12 @@ class StencilObject(abc.ABC):
                     raise ValueError(
                         f"An incompatible view was passed for field {name} to the stencil. "
                     )
-                for name_other, field_other in used_arg_fields.items():
-                    if field_other.mask == field.mask:
-                        if not field_other.shape == field.shape:
-                            raise ValueError(
-                                f"The fields {name} and {name_other} have the same mask but different shapes."
-                            )
+                # for name_other, field_other in used_arg_fields.items():
+                #     if field_other.mask == field.mask:
+                #         if not field_other.shape == field.shape:
+                #             raise ValueError(
+                #                 f"The fields {name} and {name_other} have the same mask but different shapes."
+                #             )
 
         # assert compatibility of parameters with stencil
         for name, parameter in used_arg_params.items():
@@ -278,3 +278,5 @@ class StencilObject(abc.ABC):
         self.run(
             _domain_=domain, _origin_=origin, exec_info=exec_info, **field_args, **parameter_args
         )
+        if exec_info is not None:
+            exec_info["call_run_end_time"] = time.perf_counter()

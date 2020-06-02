@@ -23,8 +23,6 @@ import gt4py.gtscript as gtscript
 from .stencil_definitions import REGISTRY as stencil_registry
 from .stencil_definitions import EXTERNALS_REGISTRY
 
-from ..utils import id_version
-
 
 def generate_test_module(name, backend, *, id_version, rebuild=True):
     module_name = "_test_module." + name
