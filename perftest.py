@@ -155,6 +155,7 @@ if __name__ == "__main__":
         "end_run_cpp_time",
         "run_end_time",
         "call_run_end_time",
+        "call_end_time",
     ]
     if not os.path.exists(args.outfile):
         with open(args.outfile, "w") as handle:
