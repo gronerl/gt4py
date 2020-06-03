@@ -143,6 +143,8 @@ if __name__ == "__main__":
         test_function = run_horizontal_diffusion
     elif stencil_name == "vertical_advection":
         test_function = run_vertical_advection_dycore
+    else:
+        assert False
     exec_infos = run_horizontal_diffusion(backend, (nxy, nxy, nz), ntrials)
     assert len(exec_infos) == ntrials
     keys = [
@@ -154,8 +156,8 @@ if __name__ == "__main__":
         "run_end_time",
         "call_run_end_time",
     ]
-    if os.stat(args.outfile).st_size == 0:
-        with open(args.outfile, "a") as handle:
+    if not os.path.exists(args.outfile):
+        with open(args.outfile, "w") as handle:
             handle.write("stencil_name; backend;nxy; nz;")
             for key in keys:
                 handle.write(key + ";")
