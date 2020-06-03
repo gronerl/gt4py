@@ -100,6 +100,7 @@ void run_computation(const std::array<gt::uint_t, 3>& domain,
         {{ param.name }}
 {%- endfor %});
 
+    cudaDeviceSynchronize(0);
     if (!exec_info.is(py::none()))
     {
         auto exec_info_dict = exec_info.cast<py::dict>();

@@ -419,18 +419,6 @@ pyext_module.run_computation(list(_domain_), {run_args}, exec_info)
 """.format(
             run_args=", ".join(args)
         )
-        if self.backend_name == "gtcuda":
-            source = (
-                source
-                + """import cupy
-cupy.cuda.Device(0).synchronize()
-"""
-            )
-        source = source + (
-            """if exec_info is not None:
-    exec_info["run_end_time"] = time.perf_counter()
-"""
-        )
         sources.extend(source.splitlines())
 
         return sources.text
