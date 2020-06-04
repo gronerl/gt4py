@@ -105,11 +105,11 @@ def run_vertical_advection_dycore(backend, domain, ntrials):
     exec_infos = []
     for i in range(ntrials):
         exec_info = {}
-        testmodule.run(
+        testmodule(
             **arg_fields,
             # **{k: v.view(np.ndarray) for k, v in arg_fields.items()},
-            _domain_=domain,
-            _origin_=origins,
+            domain=domain,
+            origin=origins,
             # _origin_={
             #    k: [oo[0] if isinstance(oo, tuple) else oo for oo in o] for k, o in origins.items()
             # },
@@ -145,27 +145,28 @@ if __name__ == "__main__":
         test_function = run_vertical_advection_dycore
     else:
         assert False
-    exec_infos = run_horizontal_diffusion(backend, (nxy, nxy, nz), ntrials)
-    assert len(exec_infos) == ntrials
-    keys = [
-        "call_start_time",
-        "call_run_start_time",
-        "run_start_time",
-        "start_run_cpp_time",
-        "end_run_cpp_time",
-        "run_end_time",
-        "call_run_end_time",
-        "call_end_time",
-    ]
-    if not os.path.exists(args.outfile):
-        with open(args.outfile, "w") as handle:
-            handle.write("stencil_name; backend;nxy; nz;")
-            for key in keys:
-                handle.write(key + ";")
-            handle.write("\n")
-    with open(args.outfile, "a") as handle:
-        for exec_info in exec_infos:
-            handle.write(f"{stencil_name};{backend};{nxy};{nz};")
-            for key in keys:
-                handle.write(str(exec_info.get(key, 0.0)) + ";")
-            handle.write("\n")
+    for i in range(ntrials):
+        exec_infos = test_function(backend, (nxy, nxy, nz), 11)
+        assert len(exec_infos) == 11
+        keys = [
+            "call_start_time",
+            "call_run_start_time",
+            "run_start_time",
+            "start_run_cpp_time",
+            "end_run_cpp_time",
+            "run_end_time",
+            "call_run_end_time",
+            "call_end_time",
+        ]
+        if not os.path.exists(args.outfile):
+            with open(args.outfile, "w") as handle:
+                handle.write("stencil_name;backend;nxy;nz;ntrial;")
+                for key in keys:
+                    handle.write(key + ";")
+                handle.write("\n")
+        with open(args.outfile, "a") as handle:
+            for exec_info in exec_infos[1:]:
+                handle.write(f"{stencil_name};{backend};{nxy};{nz};{i};")
+                for key in keys:
+                    handle.write(str(exec_info.get(key, 0.0)) + ";")
+                handle.write("\n")
