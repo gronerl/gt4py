@@ -74,11 +74,10 @@ def test_generation_gpu(name, backend):
     stencil(**args, origin=(10, 10, 10), domain=(3, 3, 3))
 
 
-def test_temporary_field_declared_in_if_raises():
-
-    from gt4py.frontend.gtscript_frontend import GTScriptSymbolError
-
-    with pytest.raises(GTScriptSymbolError):
+class TestTemporaryDeclarationsInConditionals:
+    def test_defined_both_same(self):
+        """It is fine to write to field_b the first time in a conditional, if the implicit type
+        is the same in both the if.. and else.. branch"""
 
         @gtscript.stencil(backend="debug")
         def definition(field_a: gtscript.Field[np.float_]):
@@ -88,3 +87,90 @@ def test_temporary_field_declared_in_if_raises():
                 else:
                     field_b = field_a
                 field_a = field_b
+
+    def test_defined_both_different(self):
+        """field_b is used to write a floating point value once and once with integer, this is
+        ambiguous."""
+
+        from gt4py.frontend.gtscript_frontend import GTScriptDataTypeError
+
+        with pytest.raises(
+            GTScriptDataTypeError, match="Symbol 'field_b' used with inconsistent data types."
+        ):
+
+            @gtscript.stencil(backend="debug")
+            def definition(field_a: gtscript.Field[np.float_]):
+                with computation(PARALLEL), interval(...):
+                    if field_a < 0:
+                        field_b = 0.0
+                    else:
+                        field_b = 0
+                    field_a = field_b
+
+    def test_defined_single_read_later(self):
+        """field_b is declared in a conditional such that potentially undefined values remain,
+        this is disallowed"""
+
+        from gt4py.frontend.gtscript_frontend import GTScriptDefinitionError
+
+        with pytest.raises(GTScriptDefinitionError):
+
+            @gtscript.stencil(backend="debug")
+            def definition(field_a: gtscript.Field[np.float_]):
+                with computation(PARALLEL), interval(...):
+                    if field_a < 0:
+                        field_b = 0.0
+                    field_a = field_b
+
+        with pytest.raises(
+            GTScriptDefinitionError,
+            match="Temporary 'field_b' declared in only one branch of conditional but accessed "
+            "again outside of conditional",
+        ):
+
+            @gtscript.stencil(backend="debug")
+            def definition(field_a: gtscript.Field[np.float_]):
+                with computation(PARALLEL), interval(...):
+                    if field_a < 0:
+                        field_a = 0.0
+                    else:
+                        field_b = 0.0
+                    field_a = field_b
+
+    def test_defined_single_local(self):
+        """field_b is declared in only one branch of the conditional but is only used there, this
+        is fine."""
+
+        @gtscript.stencil(backend="debug")
+        def definition(field_a: gtscript.Field[np.float_]):
+            with computation(PARALLEL), interval(...):
+                if field_a < 0:
+                    field_b = 0.0
+                    field_a = field_b
+                field_a = field_a + 1
+
+        @gtscript.stencil(backend="debug")
+        def definition(field_a: gtscript.Field[np.float_]):
+            with computation(PARALLEL), interval(...):
+                if field_a < 0:
+                    field_b = 0.0
+                    if field_a:
+                        field_b = 1.0
+                    else:
+                        field_b = 2
+                field_a = field_a + 1
+
+
+@gtscript.function
+def plus_one(in_field):
+    tmp = in_field + 1
+    return tmp
+
+
+def test_subroutine_in_conditional():
+    @gtscript.stencil(backend="debug")
+    def definition(field_a: gtscript.Field[np.float_], field_b: gtscript.Field[np.float_]):
+        with computation(PARALLEL), interval(...):
+            field_c = 0
+            if field_a < 0:
+                field_b = plus_one(field_a)

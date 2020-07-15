@@ -398,7 +398,71 @@ class CompiledIfInliner(ast.NodeTransformer):
         return node if node else None
 
 
-#
+class CollectTemporaryFields(ast.NodeVisitor):
+    def __init__(self, fields_decls, parameter_decls):
+        self.fields_decls = copy.deepcopy(fields_decls)
+        self.parameter_decls = copy.deepcopy(parameter_decls)
+        known_symbols = set(self.fields_decls) | set(self.parameter_decls) | gtscript.builtins
+        self.state = dict(known_symbols=known_symbols, forbidden_symbols=set(), is_target=None)
+
+    @staticmethod
+    def apply(node: ast.FunctionDef, fields_decls, parameter_decls):
+        visitor = CollectTemporaryFields(fields_decls, parameter_decls)
+        visitor.visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        for stmt in node.body:
+            self.visit(stmt)
+
+    def visit_Assign(self, node: ast.Assign):
+        self.state["is_target"] = False
+        self.visit(node.value)
+        self.state["is_target"] = True
+        for stmt in node.targets:
+            self.visit(stmt)
+        self.state["is_target"] = None
+
+        # add value to new symbols
+        # add target to known symbols and new symbols.
+
+    def visit_Name(self, node: ast.Name):
+        if self.state["is_target"]:
+            self.state["known_symbols"].add(node.id)
+        else:
+            if node.id not in self.state["known_symbols"]:
+                raise GTScriptSymbolError(
+                    node.id,
+                    message=f"Unknown symbol '{node.id}' symbol (line: {node.lineno}, col: {node.col_offset})",
+                )
+            if node.id in self.state["forbidden_symbols"]:
+                raise GTScriptDefinitionError(
+                    node.id,
+                    value=None,
+                    message=f"Temporary '{node.id}' declared in only one branch of conditional but "
+                    f"accessed again outside of conditional "
+                    f"(line: {node.lineno}, col: {node.col_offset})",
+                )
+
+    def visit_If(self, node: ast.If):
+        self.visit(node.test)
+
+        known_symbols = copy.deepcopy(self.state["known_symbols"])
+        for stmt in node.body:
+            self.visit(stmt)
+        body_new_symbols = self.state["known_symbols"] - known_symbols
+
+        self.state["known_symbols"] = copy.deepcopy(known_symbols)
+        for stmt in node.orelse:
+            self.visit(stmt)
+        orelse_new_symbols = self.state["known_symbols"] - known_symbols
+
+        self.state["forbidden_symbols"] |= body_new_symbols ^ orelse_new_symbols
+        self.state["known_symbols"] = known_symbols | (body_new_symbols | orelse_new_symbols)
+
+    def visit_With(self, node: ast.With):
+        self.generic_visit(node)
+
+
 # class Cleaner(gt_ir.IRNodeVisitor):
 #     @classmethod
 #     def apply(cls, ast_object):
@@ -481,7 +545,7 @@ class IRMaker(ast.NodeVisitor):
         self.domain = domain or gt_ir.Domain.LatLonGrid()
         self.extra_temp_decls = extra_temp_decls or {}
         self.parsing_context = None
-        self.in_if = False
+        # self.in_if = False
 
     def __call__(self, ast_root: ast.AST):
         assert (
@@ -798,7 +862,7 @@ class IRMaker(ast.NodeVisitor):
         return result
 
     def visit_If(self, node: ast.If) -> gt_ir.If:
-        self.in_if = True
+        # self.in_if = True
         main_stmts = []
         for stmt in node.body:
             main_stmts.extend(gt_utils.listify(self.visit(stmt)))
@@ -815,7 +879,7 @@ class IRMaker(ast.NodeVisitor):
             main_body=gt_ir.BlockStmt(stmts=main_stmts),
             else_body=gt_ir.BlockStmt(stmts=else_stmts) if else_stmts else None,
         )
-        self.in_if = False
+        # self.in_if = False
 
         return result
 
@@ -857,11 +921,11 @@ class IRMaker(ast.NodeVisitor):
                     )
             if isinstance(t, ast.Name):
                 if not self._is_known(t.id):
-                    if self.in_if:
-                        raise GTScriptSymbolError(
-                            name=t.id,
-                            message="Temporary field {name} implicitly defined within run-time if-else region.",
-                        )
+                    # if self.in_if:
+                    #     raise GTScriptSymbolError(
+                    #         name=t.id,
+                    #         message=f"Temporary field '{t.id}' implicitly defined within run-time if-else region.",
+                    #     )
                     field_decl = gt_ir.FieldDecl(
                         name=t.id,
                         data_type=gt_ir.DataType.AUTO,
@@ -1296,6 +1360,8 @@ class GTScriptParser(ast.NodeVisitor):
         # Evaluate and inline compile-time conditionals
         CompiledIfInliner.apply(main_func_node, context=local_context)
         # Cleaner.apply(self.definition_ir)
+
+        field_decls = CollectTemporaryFields.apply(main_func_node, fields_decls, parameter_decls)
 
         # Generate definition IR
         domain = gt_ir.Domain.LatLonGrid()

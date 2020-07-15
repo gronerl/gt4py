@@ -33,6 +33,7 @@ from gt4py.analysis import (
     TransformData,
     TransformPass,
 )
+from gt4py.frontend.gtscript_frontend import GTScriptDataTypeError
 from gt4py.utils import UniqueIdGenerator
 
 
@@ -77,11 +78,6 @@ class InitInfoPass(TransformPass):
 
         def visit_Decl(self, node: gt_ir.FieldDecl):
             self._add_symbol(node)
-            return None
-
-        def visit_BlockStmt(self, node: gt_ir.BlockStmt):
-            result = [self.visit(stmt) for stmt in node.stmts]
-            return [item for item in result if item is not None]
 
         def visit_StencilDefinition(self, node: gt_ir.StencilDefinition):
             # Add API symbols first
@@ -264,6 +260,8 @@ class InitInfoPass(TransformPass):
                 stmts.extend(node.else_body.stmts)
             for stmt in stmts:
                 stmt_info = self.visit(stmt)
+                if stmt_info is None:
+                    continue
                 inputs = self._merge_extents(list(inputs.items()) + list(stmt_info.inputs.items()))
                 outputs |= stmt_info.outputs
             cond_info = self.visit(node.condition)
@@ -278,6 +276,8 @@ class InitInfoPass(TransformPass):
             outputs = set()
             for stmt in node.stmts:
                 stmt_info = self.visit(stmt)
+                if stmt_info is None:
+                    continue
                 inputs = self._merge_extents(list(inputs.items()) + list(stmt_info.inputs.items()))
                 outputs |= stmt_info.outputs
 
@@ -638,9 +638,7 @@ class DataTypePass(TransformPass):
         def visit_Assign(self, node: gt_ir.Assign, **kwargs):
             self.visit(node.value, **kwargs)
             if hasattr(node.target, "data_type") and node.target.data_type != node.value.data_type:
-                raise Exception(
-                    "Symbol '{}' used with inconsistent data types.".format(node.target.name)
-                )
+                self._inconsistent_dtype(node)
             node.target.data_type = getattr(node.value, "data_type", gt_ir.DataType.AUTO)
             if self.fields[node.target.name].data_type == gt_ir.DataType.AUTO:
                 self.fields[node.target.name].data_type = node.value.data_type
@@ -700,6 +698,14 @@ class DataTypePass(TransformPass):
                 node.then_expr.data_type, node.else_expr.data_type
             )
 
+        def _inconsistent_dtype(self, node):
+            raise GTScriptDataTypeError(
+                name=node.id,
+                data_type=node.data_type,
+                message="Symbol '{name}' used with inconsistent data types at line {line}, "
+                "column {col}.".format(name=node.id, line=node.lineno, col=node.col_offset),
+            )
+
     def apply(self, transform_data: TransformData):
         collect_data_type = self.CollectDataTypes()
         collect_data_type(transform_data.implementation_ir)
@@ -721,6 +727,20 @@ class ComputeUsedSymbolsPass(TransformPass):
         visitor = self.ComputeUsedVisitor(transform_data)
         visitor.visit(transform_data.definition_ir)
         return transform_data
+
+
+class PruneDeclsPass(gt_ir.IRNodeVisitor):
+    def visit_BlockStmt(self, node: gt_ir.BlockStmt):
+        stmts = []
+        for stmt in node.stmts:
+            self.visit(stmt)
+            if not isinstance(stmt, (gt_ir.VarDecl, gt_ir.FieldDecl)):
+                stmts.append(stmt)
+        node.stmts = stmts
+
+    def apply(self, transform_data: TransformData):
+        self.visit(transform_data.definition_ir)
+        print("")
 
 
 class BuildIIRPass(TransformPass):

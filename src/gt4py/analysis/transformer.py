@@ -29,6 +29,7 @@ from .passes import (
     BuildIIRPass,
     DataTypePass,
     ComputeUsedSymbolsPass,
+    PruneDeclsPass,
 )
 
 
@@ -102,6 +103,10 @@ class IRTransformer:
         # Compute used symbols
         compute_used_symbols_pass = ComputeUsedSymbolsPass()
         compute_used_symbols_pass.apply(self.transform_data)
+
+        # Remove FieldDecl and VarDecl if they have been moved from DefintionIR to IIR
+        prune_decls_pass = PruneDeclsPass()
+        prune_decls_pass.apply(self.transform_data)
 
         # Build IIR
         build_iir_pass = BuildIIRPass()
