@@ -74,14 +74,25 @@ def run_horizontal_diffusion(
         if not np.allclose(
             arg_fields_test[k].view(np.ndarray), arg_fields_reference[k].view(np.ndarray)
         ):
-            import warnings
-
-            warnings.warn(
-                "Large error in field {k}. (||err||=={err})".format(
+            raise RuntimeError(
+                "Large error in field {k}. (||err||=={err}, max_atol={atol}, max_rtol={rtol})".format(
                     k=k,
-                    err=np.norm(
+                    err=np.linalg.norm(
                         arg_fields_test[k].view(np.ndarray)
                         - arg_fields_reference[k].view(np.ndarray)
+                    ),
+                    atol=np.max(
+                        np.abs(
+                            arg_fields_test[k].view(np.ndarray)
+                            - arg_fields_reference[k].view(np.ndarray)
+                        )
+                    ),
+                    rtol=np.max(
+                        np.abs(
+                            arg_fields_test[k].view(np.ndarray)
+                            - arg_fields_reference[k].view(np.ndarray)
+                        )
+                        / np.abs(arg_fields_reference[k].view(np.ndarray))
                     ),
                 )
             )
@@ -277,9 +288,7 @@ def run_vertical_advection(
             if not np.allclose(
                 arg_fields_test[k].view(np.ndarray), arg_fields_reference[k].view(np.ndarray)
             ):
-                import warnings
-
-                warnings.warn(
+                raise RuntimeError(
                     "Large error in field {k}. (||err||=={err}, max_atol={atol}, max_rtol={rtol})".format(
                         k=k,
                         err=np.linalg.norm(
@@ -354,35 +363,72 @@ def summary(exec_infos):
     return res
 
 
+from gt4py.backend.dace.base_backend import DaceOptimizer
+from gt4py.backend.dace.base_backend import CudaDaceOptimizer
+from gt4py.backend.dace.base_backend import SDFGInjector
+
+
+class CudaNoOpt(CudaDaceOptimizer):
+    pass
+
+
+class SpecializingInjector(SDFGInjector):
+    def __init__(self, sdfg, domain):
+        super().__init__(sdfg)
+        self.domain = domain
+
+    def transform_optimize(self, sdfg):
+        import copy
+        import dace
+
+        res: dace.SDFG = copy.deepcopy(self.sdfg)
+
+        strides = [None] * 3
+        from gt4py.backend.dace.base_backend import dace_layout
+
+        layout = dace_layout([True] * 3)
+        stride = 1
+        domain = [dace.symbolic.symbol(d) for d in "IJK"]
+        for i in reversed(np.argsort(layout)):
+            strides[i] = stride
+            stride = stride * domain[i]
+
+        for var, d in zip("IJK", strides):
+            res.replace(f"_ccol_{var}_stride", str(d))
+            res.replace(f"_dcol_{var}_stride", str(d))
+
+        if len(res.signature_arglist()) != len(sdfg.signature_arglist()):
+            raise ValueError(
+                "SDFG to inject does not have matching signature length. ({here} != {raw})".format(
+                    here=len(res.signature_arglist()), raw=len(sdfg.signature_arglist())
+                )
+            )
+        if not all(
+            here == res for here, res in zip(res.signature_arglist(), sdfg.signature_arglist())
+        ):
+            l = list(
+                (here, res)
+                for here, res in zip(res.signature_arglist(), sdfg.signature_arglist())
+                if here != res
+            )
+            raise ValueError(
+                "SDFG to inject does not have matching signature. ({here} != {raw})".format(
+                    here=l[0][0], raw=l[0][1]
+                )
+            )
+        res.specialize({var: d for var, d in zip("IJK", self.domain)})
+        return res
+
+
 if __name__ == "__main__":
-    import gt4py.backend as gt_backend
 
     niter = 10
-    # domain = (256, 256, 64)
-    # domain = (16, 16, 32)
     domain = (128, 128, 80)
     validation_domain = (128, 128, 80)
-    # domain = (16, 16, 32)
     dtype = np.float32
-    from gt4py.backend.dace.base_backend import DaceOptimizer
-    from gt4py.backend.dace.base_backend import CudaDaceOptimizer
-    from gt4py.backend.dace.base_backend import SDFGInjector
-
-    class CudaNoOpt(CudaDaceOptimizer):
-        pass
-
-    class SpecializingInjector(SDFGInjector):
-        def __init__(self, sdfg, domain):
-            super().__init__(sdfg)
-            self.domain = domain
-
-        def transform_optimize(self, sdfg):
-            res = super().transform_optimize(sdfg)
-            res.specialize({var: d for var, d in zip("IJK", self.domain)})
-            return res
 
     print("##vertical advection")
-    print("start dace")
+    # print("start dace")
     # dace_exec_infos = run_vertical_advection(
     #     niter=niter, domain=domain, backend=gt_backend.from_name("dacex86")
     # )
@@ -405,29 +451,34 @@ if __name__ == "__main__":
         backend="dacecuda",
         dtype=dtype,
         backend_opts=dict(
-            optimizer=SpecializingInjector("/scratch/snx3000tds/gronerl/vadv.sdfg", domain)
+            optimizer=SpecializingInjector(
+                "/scratch/snx3000tds/gronerl/vadv-2part.sdfg",
+                domain
+                # "/scratch/snx3000tds/gronerl/vadv-fused.sdfg",
+                # domain,
+            )
         ),
         validation_domain=validation_domain,
     )
-    print("start gtcuda")
-    gt_exec_infos = run_vertical_advection(
-        niter=niter,
-        domain=domain,
-        backend="gtcuda",
-        dtype=dtype,
-        validation_domain=validation_domain,
-    )
+    # print("start gtcuda")
+    # gt_exec_infos = run_vertical_advection(
+    #     niter=niter,
+    #     domain=domain,
+    #     backend="gtcuda",
+    #     dtype=dtype,
+    #     validation_domain=validation_domain,
+    # )
 
     print("dace times:")
     for k, v in summary(dace_exec_infos).items():
         print("\t{}: {}us per call".format(k, int(v * 1e6 / 10)))
-    print("gt times:")
-    for k, v in summary(gt_exec_infos).items():
-        print("\t{}: {}us per call".format(k, int(v * 1e6 / 10)))
+    # print("gt times:")
+    # for k, v in summary(gt_exec_infos).items():
+    #     print("\t{}: {}us per call".format(k, int(v * 1e6 / 10)))
 
     #########################################################
 
-    print("##horizontal diffusion")
+    # print("##horizontal diffusion")
     # print("start dace")
     # dace_exec_infos = run_horizontal_diffusion(
     #     niter=niter, domain=domain, backend=gt_backend.from_name("dacex86")
@@ -443,29 +494,29 @@ if __name__ == "__main__":
     # for k, v in summary(gt_exec_infos).items():
     #     print("\t{}: {}".format(k, v))
 
-    print("start dacecuda")
-    dace_exec_infos = run_horizontal_diffusion(
-        niter=niter,
-        domain=domain,
-        backend="dacecuda",
-        dtype=dtype,
-        backend_opts=dict(),
-        validation_domain=validation_domain,
-    )
-    print("start gtcuda")
-    gt_exec_infos = run_horizontal_diffusion(
-        niter=niter,
-        domain=domain,
-        backend="gtcuda",
-        dtype=dtype,
-        validation_domain=validation_domain,
-    )
-    print("dace times:")
-    for k, v in summary(dace_exec_infos).items():
-        print("\t{}: {}us per call".format(k, int(v * 1e6 / 10)))
-    print("gt times:")
-    for k, v in summary(gt_exec_infos).items():
-        print("\t{}: {}us per call".format(k, int(v * 1e6 / 10)))
-    import gt4py.backend as gt_backend
+    # print("start dacecuda")
+    # dace_exec_infos = run_horizontal_diffusion(
+    #     niter=niter,
+    #     domain=domain,
+    #     backend="dacecuda",
+    #     dtype=dtype,
+    #     backend_opts=dict(),
+    #     validation_domain=validation_domain,
+    # )
+    # print("start gtcuda")
+    # gt_exec_infos = run_horizontal_diffusion(
+    #     niter=niter,
+    #     domain=domain,
+    #     backend="gtcuda",
+    #     dtype=dtype,
+    #     validation_domain=validation_domain,
+    # )
+    # print("dace times:")
+    # for k, v in summary(dace_exec_infos).items():
+    #     print("\t{}: {}us per call".format(k, int(v * 1e6 / 10)))
+    # print("gt times:")
+    # for k, v in summary(gt_exec_infos).items():
+    #     print("\t{}: {}us per call".format(k, int(v * 1e6 / 10)))
+    # import gt4py.backend as gt_backend
 
     #############################################
