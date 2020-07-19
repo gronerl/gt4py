@@ -1,9 +1,15 @@
 import abc
 import sys
 import time
+from types import SimpleNamespace
 import warnings
 
 import numpy as np
+
+try:
+    import cupy as cp
+except:
+    cp = None
 
 import gt4py.backend as gt_backend
 import gt4py.storage as gt_storage
@@ -184,21 +190,47 @@ class StencilObject(abc.ABC):
             if parameter_info is not None and parameter_args[name] is None:
                 raise ValueError(f"Parameter '{name}' is None.")
         # assert compatibility of fields with stencil
+        device = gt_backend.from_name(self.backend).storage_info["device"]
+
         for name, field in used_arg_fields.items():
+            if hasattr(field, "__gt_interface__"):
+                gt_interface = field.__gt_interface__
+
+                if device in gt_interface:
+                    if (
+                        "acquire" in gt_interface[device]
+                        and gt_interface[device]["acquire"] is not None
+                    ):
+                        gt_interface[device]["acquire"]()
+                    if device == "cpu":
+                        field = SimpleNamespace(__array_interface__=gt_interface[device])
+                        used_arg_fields[name] = field = np.asarray(field)
+                    elif device == "gpu":
+                        field = SimpleNamespace(__cuda_array_interface__=gt_interface[device])
+                        used_arg_fields[name] = field = cp.asarray(field)
+                    else:
+                        raise ValueError("No buffer for this backend specified.")
+
+                    if "dims" in gt_interface[device]:
+                        dims = gt_interface[device]["dims"]
+                        permutation = tuple(
+                            np.where([d == k for d in "IJK"])[0].item() for k in dims
+                        )
+                        used_arg_fields[name] = field = field.transpose(permutation)
+            else:
+                if device == "cpu":
+                    used_arg_fields[name] = field = np.asarray(field)
+                elif device == "gpu":
+                    field = cp.asarray(
+                        SimpleNamespace(__cuda_array_interface__=gt_interface[device])
+                    )
+                    used_arg_fields[name] = field = cp.asarray(field)
+
             if not gt_backend.from_name(self.backend).storage_info["is_compatible_layout"](field):
                 raise ValueError(
                     f"The layout of the field {name} is not compatible with the backend."
                 )
 
-            if not gt_backend.from_name(self.backend).storage_info["is_compatible_type"](field):
-                raise ValueError(
-                    f"Field '{name}' has type '{type(field)}', which is not compatible with the '{self.backend}' backend."
-                )
-            elif type(field) is np.ndarray:
-                warnings.warn(
-                    "NumPy ndarray passed as field. This is discouraged and only works with constraints and only for certain backends.",
-                    RuntimeWarning,
-                )
             if not field.dtype == self.field_info[name].dtype:
                 raise TypeError(
                     f"The dtype of field '{name}' is '{field.dtype}' instead of '{self.field_info[name].dtype}'"
@@ -278,7 +310,11 @@ class StencilObject(abc.ABC):
                 )
 
         self.run(
-            _domain_=domain, _origin_=origin, exec_info=exec_info, **field_args, **parameter_args
+            _domain_=domain,
+            _origin_=origin,
+            exec_info=exec_info,
+            **used_arg_fields,
+            **used_arg_params,
         )
         if exec_info is not None:
             exec_info["call_run_end_time"] = time.perf_counter()

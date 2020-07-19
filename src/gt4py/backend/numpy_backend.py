@@ -165,11 +165,6 @@ class NumPySourceGenerator(PythonSourceGenerator):
         for info in node.api_signature:
             if info.name in node.fields and info.name not in node.unreferenced:
                 self.sources.extend(self._make_field_origin(info.name))
-                self.sources.extend(
-                    "{name} = {name}.view({np}.ndarray)".format(
-                        name=info.name, np=self.numpy_prefix
-                    )
-                )
         self.sources.empty_line()
 
         super().visit_StencilImplementation(node)
