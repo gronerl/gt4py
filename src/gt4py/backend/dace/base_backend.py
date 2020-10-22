@@ -19,7 +19,7 @@ from .sdfg.builder import SDFGBuilder
 def dace_layout(mask):
     ctr = iter(range(sum(mask)))
     layout = [next(ctr) if m else None for m in mask]
-    return tuple(layout)
+    return tuple(layout[::-1])
 
 
 def dace_is_compatible_layout(field):
@@ -283,7 +283,7 @@ class DaceBackend(gt_backend.BaseBackend):
         sdfg = SDFGBuilder.apply(implementation_ir)
         from gt4py.backend.dace.sdfg.library.nodes import StencilLibraryNode
 
-        comp_layout = options.backend_opts.get("computation_layout", "JKI")
+        comp_layout = options.backend_opts.get("computation_layout", "JIK")
         for name, array in sdfg.arrays.items():
             import dace.data
 
