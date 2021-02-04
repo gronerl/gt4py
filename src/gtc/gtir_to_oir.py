@@ -17,7 +17,9 @@
 from dataclasses import dataclass, field
 from typing import Any, List
 
-from eve import NodeTranslator
+import networkx as nx
+
+from eve import NodeTranslator, NodeVisitor
 from gtc import gtir, oir
 from gtc.common import CartesianOffset, DataType, LogicalOperator, UnaryOperator
 
@@ -40,6 +42,12 @@ def _create_mask(ctx: "GTIRToOIR.Context", name: str, cond: oir.Expr) -> oir.Tem
     )
     ctx.add_horizontal_execution(fill_mask_field)
     return mask_field_decl
+
+
+def gtir_to_oir(gtir: gtir.Stencil) -> oir.Stencil:
+    oir_no_iteration_space = GTIRToOIR().visit(gtir)
+    oir = ExtentComputationTranslator().visit(oir_no_iteration_space)
+    return oir
 
 
 class GTIRToOIR(NodeTranslator):
@@ -177,8 +185,27 @@ class GTIRToOIR(NodeTranslator):
         )
 
     def visit_Stencil(self, node: gtir.Stencil, **kwargs: Any) -> oir.Stencil:
+        vertical_loops = self.visit(node.vertical_loops)
+
         return oir.Stencil(
             name=node.name,
             params=self.visit(node.params),
-            vertical_loops=self.visit(node.vertical_loops),
+            vertical_loops=vertical_loops,
         )
+
+
+class OIRHorizontalExecutionDependencyGraphBuilder(NodeVisitor):
+    def visit_HorizontalExecution(
+        self, node: oir.HorizontalExecution, *, interval: oir.Interval, graph: nx.Graph
+    ):
+        nx_node = nx.add_node(node)
+
+    def visit_VerticalLoop(self, node: oir.VerticalLoop, **kwargs):
+        interval = node.interval
+        self.generic_visit(node, interval=interval, **kwargs)
+        return horizontal_computations
+
+    def visit_Stencil(self, node: oir.Stencil) -> oir.Stencil:
+        graph = nx.Graph()
+        self.generic_visit(node, graph=graph)
+        return graph

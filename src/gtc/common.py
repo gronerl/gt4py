@@ -591,3 +591,30 @@ class AxisBound(Node):
     @classmethod
     def end(cls) -> "AxisBound":
         return cls.from_end(0)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AxisBound):
+            return False
+        return self.level == other.level and self.offset == other.offset
+
+    def __lt__(self, other: "AxisBound") -> bool:
+        if not isinstance(other, AxisBound):
+            return NotImplemented
+        return (self.level == LevelMarker.START and other.level == LevelMarker.END) or (
+            self.level == other.level and self.offset < other.offset
+        )
+
+    def __le__(self, other: "AxisBound") -> bool:
+        if not isinstance(other, AxisBound):
+            return NotImplemented
+        return self < other or self == other
+
+    def __gt__(self, other: "AxisBound") -> bool:
+        if not isinstance(other, AxisBound):
+            return NotImplemented
+        return not self < other and not self == other
+
+    def __ge__(self, other: "AxisBound") -> bool:
+        if not isinstance(other, AxisBound):
+            return NotImplemented
+        return not self < other

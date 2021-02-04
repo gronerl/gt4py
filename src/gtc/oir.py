@@ -21,11 +21,12 @@ OIR represents a computation at the level of GridTools stages and multistages,
 e.g. stage merging, staged computations to compute-on-the-fly, cache annotations, etc.
 """
 
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Tuple, Union
 
-from pydantic import validator
+from pydantic import root_validator, validator
 
 from eve import Str, SymbolName, SymbolTableTrait
+from eve.typingx import RootValidatorValuesType
 from gtc import common
 from gtc.common import AxisBound, LocNode
 
@@ -93,6 +94,11 @@ class TernaryOp(common.TernaryOp[Expr], Expr):
     _dtype_propagation = common.ternary_op_dtype_propagation(strict=True)
 
 
+class CartesianExcessIteration(LocNode):
+    i_excess: Tuple[int, int]
+    j_excess: Tuple[int, int]
+
+
 class Cast(common.Cast[Expr], Expr):  # type: ignore
     pass
 
@@ -127,6 +133,7 @@ class Temporary(FieldDecl):
 class HorizontalExecution(LocNode):
     body: List[Stmt]
     mask: Optional[Expr]
+    iteration_space: Optional[CartesianExcessIteration]
 
     @validator("mask")
     def mask_is_boolean_field_expr(cls, v: Optional[Expr]) -> Optional[Expr]:
@@ -139,6 +146,20 @@ class HorizontalExecution(LocNode):
 class Interval(LocNode):
     start: AxisBound
     end: AxisBound
+
+    def covers(self, other: "Interval") -> bool:
+        outer_starts_lower = self.start < other.start or self.start == other.start
+        outer_ends_higher = self.end > other.end or self.end == other.end
+        return outer_starts_lower and outer_ends_higher
+
+    def intersects(self, other: "Interval") -> bool:
+        return not (other.start >= self.end or self.start >= other.end)
+
+    @root_validator(skip_on_failure=True)
+    def ordered_check(cls, values: RootValidatorValuesType) -> RootValidatorValuesType:
+        if not values["start"] < values["end"]:
+            raise ValueError("Interval start needs to be lower than end.")
+        return values
 
 
 class VerticalLoop(LocNode):
@@ -155,3 +176,215 @@ class Stencil(LocNode, SymbolTableTrait):
 
     _validate_dtype_is_set = common.validate_dtype_is_set()
     _validate_symbol_refs = common.validate_symbol_refs()
+
+
+class IntervalSet:
+    def __init__(self) -> None:
+        self.interval_starts: List[AxisBound] = list()
+        self.interval_ends: List[AxisBound] = list()
+
+    def add(self, interval: Interval) -> None:
+        if not isinstance(interval, Interval):
+            raise TypeError("Only OIR intervals supported for method add of IntervalSet.")
+
+        delete = list()
+        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
+            if interval.covers(Interval(start=start, end=end)):
+                delete.append(i)
+            if Interval(start=start, end=end).covers(interval):
+                return
+
+        for i in reversed(delete):  # so indices keep validity while deleting
+            del self.interval_starts[i]
+            del self.interval_ends[i]
+
+        if len(self.interval_starts) == 0:
+            self.interval_starts.append(interval.start)
+            self.interval_ends.append(interval.end)
+            return
+
+        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
+            if (
+                interval.intersects(Interval(start=start, end=end))
+                or interval.end == start
+                or interval.start == end
+            ):
+                self.interval_starts[i] = min(interval.start, self.interval_starts[i])
+                self.interval_ends[i] = max(interval.end, self.interval_ends[i])
+                if i + 1 < len(self.interval_starts) and (
+                    interval.intersects(
+                        Interval(start=self.interval_starts[i + 1], end=self.interval_ends[i + 1])
+                    )
+                    or interval.end == self.interval_starts[i + 1]
+                ):
+                    self.interval_ends[i] = self.interval_ends[i + 1]
+                    del self.interval_starts[i + 1]
+                    del self.interval_ends[i + 1]
+                return
+
+        for i, start in enumerate(self.interval_starts):
+            if start > interval.start:
+                self.interval_starts.insert(i, interval.start)
+                self.interval_ends.insert(i, interval.end)
+                return
+        self.interval_starts.append(interval.start)
+        self.interval_ends.append(interval.end)
+        return
+
+    def remove(self, interval: Interval) -> None:
+        if not isinstance(interval, Interval):
+            raise TypeError("Only OIR intervals supported for method remove of IntervalSet.")
+
+        delete = list()
+        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
+            if interval.covers(Interval(start=start, end=end)):
+                delete.append(i)
+
+        for i in reversed(delete):  # so indices keep validity while deleting
+            del self.interval_starts[i]
+            del self.interval_ends[i]
+
+        if len(self.interval_starts) == 0:
+            return
+
+        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
+            if Interval(start=start, end=end).covers(interval):
+                if start != interval.start and end != interval.end:
+                    self.interval_starts.insert(i + 1, interval.end)
+                    self.interval_ends.insert(i + 1, self.interval_ends[i])
+                    self.interval_ends[i] = interval.start
+                elif start == interval.start:
+                    self.interval_starts[i] = interval.end
+                else:
+                    self.interval_ends[i] = interval.start
+                return
+
+        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
+            if interval.intersects(Interval(start=start, end=end)):
+                if self.interval_starts[i] < interval.start:
+                    self.interval_ends[i] = interval.start
+                else:
+                    self.interval_starts[i] = interval.end
+                if i + 1 < len(self.interval_starts) and (
+                    interval.intersects(
+                        Interval(start=self.interval_starts[i + 1], end=self.interval_ends[i + 1])
+                    )
+                ):
+                    self.interval_starts[i + 1] = interval.end
+
+                return
+        return
+
+
+class IntervalMapping:
+    def __init__(self) -> None:
+        self.interval_starts: List[AxisBound] = list()
+        self.interval_ends: List[AxisBound] = list()
+        self.values: List[Any] = list()
+
+    def _setitem_subset_of_existing(self, i: int, key: Interval, value: Any) -> None:
+        start = self.interval_starts[i]
+        end = self.interval_ends[i]
+        if self.values[i] is not value:
+            idx = i
+            if key.start != start:
+                self.interval_ends[i] = key.start
+                self.interval_starts.insert(i + 1, key.start)
+                self.interval_ends.insert(i + 1, key.end)
+                self.values.insert(i + 1, value)
+                idx = i + 1
+            if key.end != end:
+                self.interval_starts.insert(idx + 1, key.end)
+                self.interval_ends.insert(idx + 1, end)
+                self.values.insert(idx + 1, self.values[i])
+                self.interval_ends[idx] = key.end
+                self.values[idx] = value
+
+    def _setitem_partial_overlap(self, i: int, key: Interval, value: Any) -> None:
+        start = self.interval_starts[i]
+        if key.start < start:
+            if self.values[i] is value:
+                self.interval_starts[i] = key.start
+            else:
+                self.interval_starts[i] = key.end
+                self.interval_starts.insert(i, key.start)
+                self.interval_ends.insert(i, key.end)
+                self.values.insert(i, value)
+        else:  # key.end > end
+            if self.values[i] is value:
+                self.interval_ends[i] = key.end
+                nextidx = i + 1
+            else:
+                self.interval_ends[i] = key.start
+                self.interval_starts.insert(i + 1, key.start)
+                self.interval_ends.insert(i + 1, key.end)
+                self.values.insert(i + 1, value)
+                nextidx = i + 2
+            if nextidx < len(self.interval_starts) and (
+                key.intersects(
+                    Interval(start=self.interval_starts[nextidx], end=self.interval_ends[nextidx])
+                )
+                or self.interval_starts[nextidx] == key.end
+            ):
+                if self.values[nextidx] is value:
+                    self.interval_ends[nextidx - 1] = self.interval_ends[nextidx]
+                    del self.interval_starts[nextidx]
+                    del self.interval_ends[nextidx]
+                    del self.values[nextidx]
+                else:
+                    self.interval_starts[nextidx] = key.end
+
+    def __setitem__(self, key: Interval, value: Any) -> None:
+        if not isinstance(key, Interval):
+            raise TypeError("Only OIR intervals supported for method add of IntervalSet.")
+
+        delete = list()
+        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
+            if key.covers(Interval(start=start, end=end)):
+                delete.append(i)
+
+        for i in reversed(delete):  # so indices keep validity while deleting
+            del self.interval_starts[i]
+            del self.interval_ends[i]
+            del self.values[i]
+
+        if len(self.interval_starts) == 0:
+            self.interval_starts.append(key.start)
+            self.interval_ends.append(key.end)
+            self.values.append(value)
+            return
+
+        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
+            if Interval(start=start, end=end).covers(key):
+                self._setitem_subset_of_existing(i, key, value)
+                return
+
+        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
+            if (
+                key.intersects(Interval(start=start, end=end))
+                or start == key.end
+                or end == key.start
+            ):
+                self._setitem_partial_overlap(i, key, value)
+                return
+
+        for i, start in enumerate(self.interval_starts):
+            if start > key.start:
+                self.interval_starts.insert(i, key.start)
+                self.interval_ends.insert(i, key.end)
+                self.values.insert(i, value)
+                return
+        self.interval_starts.append(key.start)
+        self.interval_ends.append(key.end)
+        self.values.append(value)
+        return
+
+    def __getitem__(self, key: Interval) -> Any:
+        if not isinstance(key, Interval):
+            raise TypeError("Only OIR intervals supported for keys of IntervalMapping.")
+
+        res = []
+        for start, end, value in zip(self.interval_starts, self.interval_ends, self.values):
+            if key.intersects(Interval(start=start, end=end)):
+                res.append(value)
+        return res

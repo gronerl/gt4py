@@ -57,7 +57,7 @@ class GTCGTExtGenerator:
         gtir_without_unused_params = prune_unused_parameters(gtir)
         dtype_deduced = resolve_dtype(gtir_without_unused_params)
         upcasted = upcast(dtype_deduced)
-        oir = gtir_to_oir.GTIRToOIR().visit(upcasted)
+        oir = gtir_to_oir.gtir_to_oir(upcasted)
         gtcpp = oir_to_gtcpp.OIRToGTCpp().visit(oir)
         implementation = gtcpp_codegen.GTCppCodegen.apply(gtcpp, gt_backend_t=self.gt_backend_t)
         bindings = GTCppBindingsCodegen.apply(
