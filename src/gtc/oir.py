@@ -155,6 +155,11 @@ class Interval(LocNode):
     def intersects(self, other: "Interval") -> bool:
         return not (other.start >= self.end or self.start >= other.end)
 
+    def shift(self, offset: int) -> "Interval":
+        start = AxisBound(level=self.start.level, offset=self.start.offset + offset)
+        end = AxisBound(level=self.end.level, offset=self.end.offset + offset)
+        return Interval(start=start, end=end)
+
     @root_validator(skip_on_failure=True)
     def ordered_check(cls, values: RootValidatorValuesType) -> RootValidatorValuesType:
         if not values["start"] < values["end"]:
@@ -176,104 +181,6 @@ class Stencil(LocNode, SymbolTableTrait):
 
     _validate_dtype_is_set = common.validate_dtype_is_set()
     _validate_symbol_refs = common.validate_symbol_refs()
-
-
-class IntervalSet:
-    def __init__(self) -> None:
-        self.interval_starts: List[AxisBound] = list()
-        self.interval_ends: List[AxisBound] = list()
-
-    def add(self, interval: Interval) -> None:
-        if not isinstance(interval, Interval):
-            raise TypeError("Only OIR intervals supported for method add of IntervalSet.")
-
-        delete = list()
-        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
-            if interval.covers(Interval(start=start, end=end)):
-                delete.append(i)
-            if Interval(start=start, end=end).covers(interval):
-                return
-
-        for i in reversed(delete):  # so indices keep validity while deleting
-            del self.interval_starts[i]
-            del self.interval_ends[i]
-
-        if len(self.interval_starts) == 0:
-            self.interval_starts.append(interval.start)
-            self.interval_ends.append(interval.end)
-            return
-
-        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
-            if (
-                interval.intersects(Interval(start=start, end=end))
-                or interval.end == start
-                or interval.start == end
-            ):
-                self.interval_starts[i] = min(interval.start, self.interval_starts[i])
-                self.interval_ends[i] = max(interval.end, self.interval_ends[i])
-                if i + 1 < len(self.interval_starts) and (
-                    interval.intersects(
-                        Interval(start=self.interval_starts[i + 1], end=self.interval_ends[i + 1])
-                    )
-                    or interval.end == self.interval_starts[i + 1]
-                ):
-                    self.interval_ends[i] = self.interval_ends[i + 1]
-                    del self.interval_starts[i + 1]
-                    del self.interval_ends[i + 1]
-                return
-
-        for i, start in enumerate(self.interval_starts):
-            if start > interval.start:
-                self.interval_starts.insert(i, interval.start)
-                self.interval_ends.insert(i, interval.end)
-                return
-        self.interval_starts.append(interval.start)
-        self.interval_ends.append(interval.end)
-        return
-
-    def remove(self, interval: Interval) -> None:
-        if not isinstance(interval, Interval):
-            raise TypeError("Only OIR intervals supported for method remove of IntervalSet.")
-
-        delete = list()
-        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
-            if interval.covers(Interval(start=start, end=end)):
-                delete.append(i)
-
-        for i in reversed(delete):  # so indices keep validity while deleting
-            del self.interval_starts[i]
-            del self.interval_ends[i]
-
-        if len(self.interval_starts) == 0:
-            return
-
-        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
-            if Interval(start=start, end=end).covers(interval):
-                if start != interval.start and end != interval.end:
-                    self.interval_starts.insert(i + 1, interval.end)
-                    self.interval_ends.insert(i + 1, self.interval_ends[i])
-                    self.interval_ends[i] = interval.start
-                elif start == interval.start:
-                    self.interval_starts[i] = interval.end
-                else:
-                    self.interval_ends[i] = interval.start
-                return
-
-        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
-            if interval.intersects(Interval(start=start, end=end)):
-                if self.interval_starts[i] < interval.start:
-                    self.interval_ends[i] = interval.start
-                else:
-                    self.interval_starts[i] = interval.end
-                if i + 1 < len(self.interval_starts) and (
-                    interval.intersects(
-                        Interval(start=self.interval_starts[i + 1], end=self.interval_ends[i + 1])
-                    )
-                ):
-                    self.interval_starts[i + 1] = interval.end
-
-                return
-        return
 
 
 class IntervalMapping:
