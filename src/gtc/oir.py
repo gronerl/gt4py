@@ -126,7 +126,11 @@ class ScalarDecl(Decl):
     pass
 
 
-class Temporary(FieldDecl):
+class LocalScalar(Decl):
+    pass
+
+
+class Temporary(Decl):
     pass
 
 
@@ -134,6 +138,7 @@ class HorizontalExecution(LocNode):
     body: List[Stmt]
     mask: Optional[Expr]
     iteration_space: Optional[CartesianExcessIteration]
+    declarations: List[LocalScalar]
 
     @validator("mask")
     def mask_is_boolean_field_expr(cls, v: Optional[Expr]) -> Optional[Expr]:
@@ -176,6 +181,7 @@ class VerticalLoop(LocNode):
 
 class Stencil(LocNode, SymbolTableTrait):
     name: Str
+    # TODO: fix to be List[Union[ScalarDecl, FieldDecl]]
     params: List[Decl]
     vertical_loops: List[VerticalLoop]
 
