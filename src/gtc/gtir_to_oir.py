@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 import networkx as nx
 
@@ -252,11 +252,11 @@ class OIRHorizontalExecutionDependencyGraphBuilder(NodeVisitor):
 
         read_k_intervals: Dict[str, oir.Interval] = dict()
         for name, offsets in access_collection.read_offsets().items():
-            offsets = iter(offsets)
-            o = next(offsets)
+            offsets_iter = iter(offsets)
+            o = next(offsets_iter)
             min_k_offset = o[2]
             max_k_offset = o[2]
-            for o in offsets:
+            for o in offsets_iter:
                 min_k_offset = min(o[2], min_k_offset) if min_k_offset is not None else o[2]
                 max_k_offset = max(o[2], max_k_offset) if max_k_offset is not None else o[2]
             start = oir.AxisBound(
@@ -302,13 +302,12 @@ class OIRHorizontalExecutionDependencyGraphBuilder(NodeVisitor):
         return graph
 
 
-def _dependency_expansion(
+def _dependency_expansion_backward(
     read_node: oir.HorizontalExecution,
     read_node_interval: oir.Interval,
     write_node: oir.HorizontalExecution,
     write_node_interval: oir.Interval,
-    excess_iterations: Dict[str, oir.CartesianExcessIteration],
-    direction: str,
+    iteration_offsets: Dict[str, Optional[oir.CartesianIterationOffset]],
 ) -> None:
     read_node_access_collection = AccessCollector.apply(read_node)
     write_node_access_collection = AccessCollector.apply(write_node)
@@ -318,77 +317,62 @@ def _dependency_expansion(
     ):
         read_offsets = read_node_access_collection.read_offsets()[name]
         for offset in read_offsets:
-            read_initerval = read_node_interval.shift(offset[2])
-            if read_initerval.intersects(write_node_interval):
-                if write_node.id_ in excess_iterations:
-                    comparison = max if direction == "forward" else min
-                    i_excess = (
-                        comparison(excess_iterations[write_node.id_].i_excess[0], -offset[0]),
-                        comparison(excess_iterations[write_node.id_].i_excess[1], offset[0]),
+            read_interval = read_node_interval.shift(offset[2])
+            if read_interval.intersects(write_node_interval):
+                iteration_offset = iteration_offsets.get(str(write_node.id_), None)
+                if iteration_offset is not None:
+                    i_offsets = (
+                        min(iteration_offset.i_offsets[0], offset[0]),
+                        max(iteration_offset.i_offsets[1], offset[0]),
                     )
-                    j_excess = (
-                        comparison(excess_iterations[write_node.id_].j_excess[1], -offset[1]),
-                        comparison(excess_iterations[write_node.id_].j_excess[1], offset[1]),
+                    j_offsets = (
+                        min(iteration_offset.j_offsets[1], offset[1]),
+                        max(iteration_offset.j_offsets[1], offset[1]),
                     )
                 else:
-                    i_excess = (-offset[0], offset[0])
-                    j_excess = (-offset[1], offset[1])
+                    i_offsets = (offset[0], offset[0])
+                    j_offsets = (offset[1], offset[1])
 
-                id_ = write_node.id_ if direction == "forward" else read_node.id_
-                excess_iterations[str(id_)] = oir.CartesianExcessIteration(
-                    i_excess=i_excess, j_excess=j_excess
+                iteration_offsets[str(write_node.id_)] = oir.CartesianIterationOffset(
+                    i_offsets=i_offsets, j_offsets=j_offsets
                 )
+    if write_node.id_ not in iteration_offsets:
+        iteration_offsets[str(write_node.id_)] = None
 
 
-def _compute_excess_iterations(
+def _compute_iteration_offsets(
     stencil: oir.Stencil, graph: nx.DiGraph
-) -> Dict[str, oir.CartesianExcessIteration]:
+) -> Dict[str, Optional[oir.CartesianIterationOffset]]:
     nodes = nx.get_node_attributes(graph, "node")
     intervals = nx.get_node_attributes(graph, "interval")
-    excess_iterations = dict()
+    excess_iterations: Dict[str, Optional[oir.CartesianIterationOffset]] = dict()
     from gtc.passes.oir_optimizations.utils import AccessCollector
 
     for node in nodes.values():
-        access_collection = AccessCollector.apply(stencil)
-        if (
-            any(f.name in access_collection.write_fields() for f in stencil.params)
-            or len(nodes) == 1
-        ):
-            excess_iterations[node.id_] = oir.CartesianExcessIteration(
-                i_excess=(0, 0), j_excess=(0, 0)
+        access_collection = AccessCollector.apply(node)
+        if any(f.name in access_collection.write_fields() for f in stencil.params):
+            excess_iterations[node.id_] = oir.CartesianIterationOffset(
+                i_offsets=(0, 0), j_offsets=(0, 0)
             )
+        else:
+            excess_iterations[node.id_] = None
 
     for id_ in reversed(list(nx.topological_sort(graph))):
         node = nodes[id_]
-        if id_ not in excess_iterations:
+        if id_ not in excess_iterations or excess_iterations[id_] is None:
             # this happens if no API output depends on this node (also not transitively) the
             # iteration space will be determined in a forward pass for completeness.
             continue
 
         for adj_id, _ in graph.in_edges(id_):
-            _dependency_expansion(
+            _dependency_expansion_backward(
                 node,
                 intervals[id_],
                 nodes[adj_id],
                 intervals[adj_id],
                 excess_iterations,
-                direction="backward",
             )
 
-    # we started at API outputs upwards in the graph, there may be downstream writes to temporaries
-    # which technically would never be noticed user-side but it is implemented here, since
-    # downstream code generation might not detect this / those nodes might not have been pruned.
-    for id_ in nx.topological_sort(graph):
-        assert id_ in excess_iterations
-        for _, adj_id in graph.out_edges(id_):
-            _dependency_expansion(
-                nodes[adj_id],
-                intervals[adj_id],
-                node,
-                intervals[id_],
-                excess_iterations,
-                direction="forward",
-            )
     return excess_iterations
 
 
@@ -396,13 +380,13 @@ class OIRIterationSpaceTranslator(NodeTranslator):
     @classmethod
     def apply(cls, stencil: oir.Stencil) -> oir.Stencil:
         graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
-        excess_iterations = _compute_excess_iterations(stencil, graph)
+        excess_iterations = _compute_iteration_offsets(stencil, graph)
         return cls().visit(stencil, graph=graph, excess_iterations=excess_iterations)
 
     def visit_HorizontalExecution(
         self,
         node: oir.HorizontalExecution,
-        excess_iterations: Dict[str, oir.CartesianExcessIteration],
+        excess_iterations: Dict[str, oir.CartesianIterationOffset],
     ) -> oir.HorizontalExecution:
         return oir.HorizontalExecution(
             body=node.body,
@@ -414,7 +398,7 @@ class OIRIterationSpaceTranslator(NodeTranslator):
         self,
         node: oir.VerticalLoop,
         graph: nx.DiGraph,
-        excess_iterations: Dict[str, oir.CartesianExcessIteration],
+        excess_iterations: Dict[str, oir.CartesianIterationOffset],
     ) -> oir.VerticalLoop:
         subgraph = graph.subgraph([he.id_ for he in node.horizontal_executions])
         subgraph_nodes = nx.get_node_attributes(subgraph, "node")

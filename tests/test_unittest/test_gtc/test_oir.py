@@ -23,15 +23,34 @@ import pytest
 from hypothesis import strategies as hyp_st
 from pydantic.error_wrappers import ValidationError
 
-from gtc.common import CartesianOffset, DataType, ExprKind, LevelMarker
+from gtc.common import (
+    ArithmeticOperator,
+    CartesianOffset,
+    DataType,
+    ExprKind,
+    LevelMarker,
+    LoopOrder,
+)
+from gtc.gtir_to_oir import (
+    OIRHorizontalExecutionDependencyGraphBuilder,
+    _compute_iteration_offsets,
+    _dependency_expansion_backward,
+)
 from gtc.oir import (
     AssignStmt,
     AxisBound,
+    BinaryOp,
+    CartesianIterationOffset,
     Expr,
     FieldAccess,
+    FieldDecl,
     HorizontalExecution,
     Interval,
     IntervalMapping,
+    Literal,
+    Stencil,
+    Temporary,
+    VerticalLoop,
 )
 
 
@@ -636,3 +655,741 @@ class TestIntervalMapping:
         assert len(res) == len(values)
         for observed, expected in zip(res, values):
             assert observed is get_instance(expected)
+
+
+class TestGraphBuilder:
+    def test_write_write_dependency(self):
+        raise NotImplementedError
+
+    def test_write_write_no_overlap(self):
+        raise NotImplementedError
+
+    def test_write_write_partially_shadowed_by_read(self):
+        raise NotImplementedError
+
+    def test_write_write_shadowed_by_read(self):
+        raise NotImplementedError
+
+    def test_read_write_dependency(self):
+        raise NotImplementedError
+
+    def test_read_write_no_overlap(self):
+        raise NotImplementedError
+
+    def test_independent_nodes(self):
+        raise NotImplementedError
+
+    def test_vertical_loop_ignored(self):
+        raise NotImplementedError
+
+    def test_no_dependencies_no_edges(self):
+        raise NotImplementedError
+
+
+class TestExcessComputationUtils:
+    class TestDependencyExpansion:
+        def test_masked_field(self):
+            write_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="tmp", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="1.0", dtype=DataType.BOOL),
+                    )
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+            read_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="out", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                mask=FieldAccess(
+                    name="tmp", offset=CartesianOffset(i=0, j=1, k=0), dtype=DataType.BOOL
+                ),
+                iteration_space=None,
+            )
+            iteration_offsets = {
+                read_node.id_: CartesianIterationOffset(i_offsets=(0, 0), j_offsets=(0, 0))
+            }
+            _dependency_expansion_backward(
+                read_node,
+                Interval(start=AxisBound.start(), end=AxisBound.end()),
+                write_node,
+                Interval(start=AxisBound.start(), end=AxisBound.end()),
+                iteration_offsets,
+            )
+            assert write_node.id_ in iteration_offsets
+            assert iteration_offsets[write_node.id_].i_offsets == (0, 0)
+            assert iteration_offsets[write_node.id_].j_offsets == (1, 1)
+
+        @pytest.mark.parametrize(
+            [
+                "read_offsets_1",
+                "read_offsets_2",
+                "iteration_offset",
+                "write_node_interval",
+                "read_node_interval",
+            ],
+            [
+                [[(0, 0, 0)], [], ((0, 0), (0, 0)), None, None],
+                [[(1, 0, 0)], [], ((1, 1), (0, 0)), None, None],
+                [[(0, 1, 0)], [], ((0, 0), (1, 1)), None, None],
+                [[(0, 0, 1)], [], ((0, 0), (0, 0)), None, None],
+                [[(-3, -7, 0)], [], ((-3, -3), (-7, -7)), None, None],
+                [
+                    [(-3, -7, 0), (-2, -6, 0)],
+                    [],
+                    ((-3, -2), (-7, -6)),
+                    None,
+                    None,
+                ],
+                [
+                    [(-3, -7, 0), (1, 2, 0)],
+                    [],
+                    ((-3, 1), (-7, 2)),
+                    None,
+                    None,
+                ],
+                [
+                    [(0, 0, 2)],
+                    [],
+                    None,
+                    Interval(start=AxisBound.start(), end=AxisBound.from_start(1)),
+                    Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
+                ],
+                [
+                    [(-3, -7, 0), (1, 2, 1)],
+                    [],
+                    None,
+                    Interval(start=AxisBound.start(), end=AxisBound.from_start(1)),
+                    Interval(start=AxisBound.from_start(2), end=AxisBound.from_start(3)),
+                ],
+                [
+                    [(-3, -7, 0), (1, 2, 1), (3, 3, 2)],
+                    [],
+                    ((1, 1), (2, 2)),
+                    Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
+                    Interval(start=AxisBound.start(), end=AxisBound.from_start(1)),
+                ],
+                [
+                    [(0, 0, -2)],
+                    [],
+                    None,
+                    Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
+                    Interval(start=AxisBound.start(), end=AxisBound.from_start(1)),
+                ],
+                [
+                    [(-3, -7, 0), (1, 2, -1)],
+                    [],
+                    None,
+                    Interval(start=AxisBound.from_start(2), end=AxisBound.from_start(3)),
+                    Interval(start=AxisBound.start(), end=AxisBound.from_start(1)),
+                ],
+                [
+                    [(-3, -7, 0), (1, 2, -1), (3, 3, -2)],
+                    [],
+                    ((1, 1), (2, 2)),
+                    Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
+                    Interval(start=AxisBound.from_start(2), end=AxisBound.from_start(3)),
+                ],
+                [
+                    [(1, 0, 0)],
+                    [(0, 1, 0)],
+                    ((0, 1), (0, 1)),
+                    None,
+                    None,
+                ],
+                [
+                    [(-3, -7, 0), (3, 3, -2)],
+                    [
+                        (1, 2, -1),
+                    ],
+                    ((1, 1), (2, 2)),
+                    Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
+                    Interval(start=AxisBound.from_start(2), end=AxisBound.from_start(3)),
+                ],
+            ],
+        )
+        def test_expand(
+            self,
+            read_offsets_1,
+            read_offsets_2,
+            iteration_offset,
+            write_node_interval,
+            read_node_interval,
+        ):
+            if write_node_interval is None:
+                write_node_interval = Interval(start=AxisBound.start(), end=AxisBound.end())
+            if read_node_interval is None:
+                read_node_interval = Interval(start=AxisBound.start(), end=AxisBound.end())
+
+            read_expression = FieldAccess(
+                name="tmp1",
+                offset=CartesianOffset(**{k: v for k, v in zip("ijk", read_offsets_1[0])}),
+            )
+            for offset in read_offsets_1[1:]:
+                read_expression = BinaryOp(
+                    op=ArithmeticOperator.ADD,
+                    left=read_expression,
+                    right=FieldAccess(
+                        name="tmp1", offset=CartesianOffset(**{k: v for k, v in zip("ijk", offset)})
+                    ),
+                )
+            for offset in read_offsets_2:
+                read_expression = BinaryOp(
+                    op=ArithmeticOperator.ADD,
+                    left=read_expression,
+                    right=FieldAccess(
+                        name="tmp2", offset=CartesianOffset(**{k: v for k, v in zip("ijk", offset)})
+                    ),
+                )
+
+            write_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="tmp1", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    ),
+                    AssignStmt(
+                        left=FieldAccess(name="tmp2", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    ),
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+            read_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="out", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=read_expression,
+                    ),
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+
+            iteration_offset_dict = {
+                read_node.id_: CartesianIterationOffset(i_offsets=(0, 0), j_offsets=(0, 0))
+            }
+            _dependency_expansion_backward(
+                read_node,
+                read_node_interval,
+                write_node,
+                write_node_interval,
+                iteration_offset_dict,
+            )
+
+            assert write_node.id_ in iteration_offset_dict
+            if iteration_offset is None:
+                assert iteration_offset_dict[write_node.id_] is None
+            else:
+                assert iteration_offset_dict[write_node.id_].i_offsets == iteration_offset[0]
+                assert iteration_offset_dict[write_node.id_].j_offsets == iteration_offset[1]
+
+        def test_overwrite_none(self):
+            write_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="tmp", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+            read_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="out", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=FieldAccess(name="tmp", offset=CartesianOffset(i=0, j=1, k=0)),
+                    )
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+            iteration_offsets = {
+                read_node.id_: CartesianIterationOffset(i_offsets=(0, 0), j_offsets=(0, 0)),
+                write_node.id_: None,
+            }
+            _dependency_expansion_backward(
+                read_node,
+                Interval(start=AxisBound.start(), end=AxisBound.end()),
+                write_node,
+                Interval(start=AxisBound.start(), end=AxisBound.end()),
+                iteration_offsets,
+            )
+            assert write_node.id_ in iteration_offsets
+            assert iteration_offsets[write_node.id_].i_offsets == (0, 0)
+            assert iteration_offsets[write_node.id_].j_offsets == (1, 1)
+
+        def test_not_overwrite_with_none(self):
+
+            write_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="tmp", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+            write_node_interval = Interval(start=AxisBound.start(), end=AxisBound.end())
+            read_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="tmp", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="2.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+            read_node_interval = Interval(start=AxisBound.start(), end=AxisBound.end())
+
+            iteration_offset_dict = {
+                write_node.id_: CartesianIterationOffset(i_offsets=(1, 1), j_offsets=(1, 1)),
+                read_node.id_: CartesianIterationOffset(i_offsets=(0, 0), j_offsets=(0, 0)),
+            }
+            _dependency_expansion_backward(
+                read_node,
+                read_node_interval,
+                write_node,
+                write_node_interval,
+                iteration_offset_dict,
+            )
+            assert write_node.id_ in iteration_offset_dict
+            assert iteration_offset_dict[write_node.id_] is not None
+            assert iteration_offset_dict[write_node.id_].i_offsets == (1, 1)
+            assert iteration_offset_dict[write_node.id_].j_offsets == (1, 1)
+
+        def test_overwrite_no_expand(self):
+
+            write_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="tmp", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+            write_node_interval = Interval(start=AxisBound.start(), end=AxisBound.end())
+            read_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(name="tmp", offset=CartesianOffset(i=0, j=0, k=0)),
+                        right=Literal(value="2.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                mask=None,
+                iteration_space=None,
+            )
+            read_node_interval = Interval(start=AxisBound.start(), end=AxisBound.end())
+
+            iteration_offset_dict = {
+                read_node.id_: CartesianIterationOffset(i_offsets=(0, 0), j_offsets=(0, 0))
+            }
+            _dependency_expansion_backward(
+                read_node,
+                read_node_interval,
+                write_node,
+                write_node_interval,
+                iteration_offset_dict,
+            )
+            assert write_node.id_ in iteration_offset_dict
+            assert iteration_offset_dict[write_node.id_] is None
+
+    class TestComputeIterationOffsets:
+        def test_double_outputs(self):
+            write1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out1",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                declarations=[],
+            )
+            write2 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out2",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=BinaryOp(
+                            op=ArithmeticOperator.ADD,
+                            left=FieldAccess(
+                                name="out1",
+                                offset=CartesianOffset(i=1, j=0, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                            right=FieldAccess(
+                                name="out1",
+                                offset=CartesianOffset(i=-1, j=0, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                            dtype=DataType.FLOAT64,
+                        ),
+                    )
+                ],
+                declarations=[],
+            )
+            vertical_loop = VerticalLoop(
+                interval=Interval(start=AxisBound.start(), end=AxisBound.end()),
+                horizontal_executions=[write1, write2],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[],
+            )
+            params = [
+                FieldDecl(name="out1", dtype=DataType.FLOAT64),
+                FieldDecl(name="out2", dtype=DataType.FLOAT64),
+            ]
+            stencil = Stencil(
+                name="test_double_outputs", params=params, vertical_loops=[vertical_loop]
+            )
+            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            assert len(graph.edges) == 1
+            assert (write1.id_, write2.id_) in graph.edges
+
+            res = _compute_iteration_offsets(stencil, graph)
+            assert res[write1.id_].i_offsets == (-1, 1)
+            assert res[write1.id_].j_offsets == (0, 0)
+            assert res[write2.id_].i_offsets == (0, 0)
+            assert res[write2.id_].j_offsets == (0, 0)
+
+        def test_independent_component_none(self):
+            write1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                declarations=[],
+            )
+            independent1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                declarations=[Temporary(name="tmp", dtype=DataType.FLOAT64)],
+            )
+            vertical_loop = VerticalLoop(
+                interval=Interval(start=AxisBound.start(), end=AxisBound.end()),
+                horizontal_executions=[write1, independent1],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[],
+            )
+            params = [
+                FieldDecl(name="out", dtype=DataType.FLOAT64),
+            ]
+            stencil = Stencil(
+                name="test_independent_component_none",
+                params=params,
+                vertical_loops=[vertical_loop],
+            )
+            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            assert len(graph.edges) == 0
+
+            res = _compute_iteration_offsets(stencil, graph)
+            assert res[write1.id_].i_offsets == (0, 0)
+            assert res[write1.id_].j_offsets == (0, 0)
+            assert res[independent1.id_] is None
+
+        def test_dead_end_none(self):
+            write1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                declarations=[],
+            )
+            independent1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp1",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=1, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                    )
+                ],
+                declarations=[Temporary(name="tmp", dtype=DataType.FLOAT64)],
+            )
+            independent2 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp2",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=1, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                    )
+                ],
+                declarations=[Temporary(name="tmp", dtype=DataType.FLOAT64)],
+            )
+            independent3 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp3",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=BinaryOp(
+                            op=ArithmeticOperator.ADD,
+                            dtype=DataType.FLOAT64,
+                            left=FieldAccess(
+                                name="tmp1",
+                                offset=CartesianOffset(i=1, j=0, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                            right=FieldAccess(
+                                name="tmp2",
+                                offset=CartesianOffset(i=0, j=1, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                        ),
+                    )
+                ],
+                declarations=[],
+            )
+            vertical_loop = VerticalLoop(
+                interval=Interval(start=AxisBound.start(), end=AxisBound.end()),
+                horizontal_executions=[write1, independent1, independent2, independent3],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[
+                    Temporary(name="tmp1", dtype=DataType.FLOAT64),
+                    Temporary(name="tmp2", dtype=DataType.FLOAT64),
+                    Temporary(name="tmp3", dtype=DataType.FLOAT64),
+                ],
+            )
+            params = [
+                FieldDecl(name="out", dtype=DataType.FLOAT64),
+            ]
+            stencil = Stencil(
+                name="test_dead_end_none",
+                params=params,
+                vertical_loops=[vertical_loop],
+            )
+            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            assert len(graph.edges) == 4
+            assert (write1.id_, independent1.id_) in graph.edges
+            assert (write1.id_, independent2.id_) in graph.edges
+            assert (independent1.id_, independent3.id_) in graph.edges
+            assert (independent2.id_, independent3.id_) in graph.edges
+
+            res = _compute_iteration_offsets(stencil, graph)
+            assert res[write1.id_].i_offsets == (0, 0)
+            assert res[write1.id_].j_offsets == (0, 0)
+            assert res[independent1.id_] is None
+            assert res[independent2.id_] is None
+            assert res[independent3.id_] is None
+
+        def test_dag_stack(self):
+            tmp1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp1",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                declarations=[],
+            )
+            tmp2 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp2",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=FieldAccess(
+                            name="tmp1",
+                            offset=CartesianOffset(i=0, j=1, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                    )
+                ],
+                declarations=[],
+            )
+            tmp3 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp3",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=FieldAccess(
+                            name="tmp1",
+                            offset=CartesianOffset(i=1, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                    )
+                ],
+                declarations=[],
+            )
+            write1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=BinaryOp(
+                            op=ArithmeticOperator.ADD,
+                            dtype=DataType.FLOAT64,
+                            left=FieldAccess(
+                                name="tmp2",
+                                offset=CartesianOffset(i=1, j=0, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                            right=FieldAccess(
+                                name="tmp3",
+                                offset=CartesianOffset(i=0, j=1, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                        ),
+                    )
+                ],
+                declarations=[],
+            )
+            vertical_loop = VerticalLoop(
+                interval=Interval(start=AxisBound.start(), end=AxisBound.end()),
+                horizontal_executions=[tmp1, tmp2, tmp3, write1],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[
+                    Temporary(name="tmp1", dtype=DataType.FLOAT64),
+                    Temporary(name="tmp2", dtype=DataType.FLOAT64),
+                    Temporary(name="tmp3", dtype=DataType.FLOAT64),
+                ],
+            )
+            params = [
+                FieldDecl(name="out", dtype=DataType.FLOAT64),
+            ]
+            stencil = Stencil(
+                name="test_dag_stack",
+                params=params,
+                vertical_loops=[vertical_loop],
+            )
+            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            assert len(graph.edges) == 4
+            assert (tmp1.id_, tmp2.id_) in graph.edges
+            assert (tmp1.id_, tmp3.id_) in graph.edges
+            assert (tmp2.id_, write1.id_) in graph.edges
+            assert (tmp3.id_, write1.id_) in graph.edges
+
+            res = _compute_iteration_offsets(stencil, graph)
+
+            assert res[write1.id_].i_offsets == (0, 0)
+            assert res[write1.id_].j_offsets == (0, 0)
+
+            assert res[tmp1.id_].i_offsets == (0, 1)
+            assert res[tmp1.id_].j_offsets == (0, 1)
+
+            assert res[tmp2.id_].i_offsets == (1, 1)
+            assert res[tmp2.id_].j_offsets == (0, 0)
+
+            assert res[tmp3.id_].i_offsets == (0, 0)
+            assert res[tmp3.id_].j_offsets == (1, 1)
+
+        def test_intervals_interlock(self):
+            raise NotImplementedError
+
+        def test_masks_are_read(self):
+            write1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.BOOL,
+                        ),
+                        right=Literal(value="true", dtype=DataType.BOOL),
+                    )
+                ],
+                declarations=[],
+            )
+            write2 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                mask=FieldAccess(
+                    name="tmp",
+                    offset=CartesianOffset(i=0, j=1, k=0),
+                    dtype=DataType.BOOL,
+                ),
+                declarations=[],
+            )
+            vertical_loop = VerticalLoop(
+                interval=Interval(start=AxisBound.start(), end=AxisBound.end()),
+                horizontal_executions=[write1, write2],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[FieldDecl(name="tmp", dtype=DataType.BOOL)],
+            )
+            params = [
+                FieldDecl(name="out", dtype=DataType.FLOAT64),
+            ]
+            stencil = Stencil(
+                name="test_masks_are_read", params=params, vertical_loops=[vertical_loop]
+            )
+            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            assert len(graph.edges) == 1
+            assert (write1.id_, write2.id_) in graph.edges
+
+            res = _compute_iteration_offsets(stencil, graph)
+            assert res[write1.id_].i_offsets == (0, 0)
+            assert res[write1.id_].j_offsets == (1, 1)
+            assert res[write2.id_].i_offsets == (0, 0)
+            assert res[write2.id_].j_offsets == (0, 0)

@@ -94,9 +94,9 @@ class TernaryOp(common.TernaryOp[Expr], Expr):
     _dtype_propagation = common.ternary_op_dtype_propagation(strict=True)
 
 
-class CartesianExcessIteration(LocNode):
-    i_excess: Tuple[int, int]
-    j_excess: Tuple[int, int]
+class CartesianIterationOffset(LocNode):
+    i_offsets: Tuple[int, int]
+    j_offsets: Tuple[int, int]
 
 
 class Cast(common.Cast[Expr], Expr):  # type: ignore
@@ -137,8 +137,8 @@ class Temporary(Decl):
 class HorizontalExecution(LocNode):
     body: List[Stmt]
     mask: Optional[Expr]
-    iteration_space: Optional[CartesianExcessIteration]
     declarations: List[LocalScalar]
+    iteration_space: Optional[CartesianIterationOffset]
 
     @validator("mask")
     def mask_is_boolean_field_expr(cls, v: Optional[Expr]) -> Optional[Expr]:
