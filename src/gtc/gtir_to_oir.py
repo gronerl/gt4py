@@ -49,9 +49,6 @@ def _create_mask(ctx: "GTIRToOIR.Context", name: str, cond: oir.Expr) -> oir.Tem
 def gtir_to_oir(gtir: gtir.Stencil) -> oir.Stencil:
     oir_no_iteration_space = GTIRToOIR().visit(gtir)
     stencil = OIRIterationSpaceTranslator.apply(oir_no_iteration_space)
-    for vl in stencil.vertical_loops:
-        for he in vl.horizontal_executions:
-            assert he.iteration_space is not None
     return stencil
 
 
@@ -312,30 +309,76 @@ def _dependency_expansion_backward(
     read_node_access_collection = AccessCollector.apply(read_node)
     write_node_access_collection = AccessCollector.apply(write_node)
 
-    for name in (
-        read_node_access_collection.read_fields() & write_node_access_collection.write_fields()
-    ):
-        read_offsets = read_node_access_collection.read_offsets()[name]
-        for offset in read_offsets:
-            read_interval = read_node_interval.shift(offset[2])
-            if read_interval.intersects(write_node_interval):
-                iteration_offset = iteration_offsets.get(str(write_node.id_), None)
-                if iteration_offset is not None:
-                    i_offsets = (
-                        min(iteration_offset.i_offsets[0], offset[0]),
-                        max(iteration_offset.i_offsets[1], offset[0]),
-                    )
-                    j_offsets = (
-                        min(iteration_offset.j_offsets[1], offset[1]),
-                        max(iteration_offset.j_offsets[1], offset[1]),
-                    )
-                else:
-                    i_offsets = (offset[0], offset[0])
-                    j_offsets = (offset[1], offset[1])
+    read_iteration_offset = iteration_offsets.get(str(read_node.id_), None)
+    if read_iteration_offset is not None:
 
-                iteration_offsets[str(write_node.id_)] = oir.CartesianIterationOffset(
-                    i_offsets=i_offsets, j_offsets=j_offsets
+        for name in (
+            read_node_access_collection.read_fields() & write_node_access_collection.write_fields()
+        ):
+            read_offsets = read_node_access_collection.read_offsets()[name]
+
+            is_write_before_read = False
+            collections = []
+            if read_node.mask is not None:
+                mask_access_collection = AccessCollector.Result([])
+                AccessCollector().visit(
+                    read_node.mask,
+                    accesses=mask_access_collection._ordered_accesses,
+                    is_write=False,
                 )
+                collections.append(mask_access_collection)
+
+            for stmt in read_node.body:
+                stmt_access_collection = AccessCollector.Result([])
+                AccessCollector().visit(stmt, accesses=stmt_access_collection._ordered_accesses)
+                collections.append(stmt_access_collection)
+
+            for collection in collections:
+                if name in collection.read_fields():
+                    break
+                elif name in collection.write_fields():
+                    is_write_before_read = True
+            if is_write_before_read and all(ro[2] == 0 for ro in read_offsets):
+                continue
+
+            for offset in read_offsets:
+                read_interval = read_node_interval.shift(offset[2])
+                if read_interval.intersects(write_node_interval):
+                    write_iteration_offset = iteration_offsets.get(str(write_node.id_), None)
+                    if write_iteration_offset is not None:
+                        i_offsets = (
+                            min(
+                                write_iteration_offset.i_offsets[0],
+                                read_iteration_offset.i_offsets[0] + offset[0],
+                            ),
+                            max(
+                                write_iteration_offset.i_offsets[1],
+                                read_iteration_offset.i_offsets[1] + offset[0],
+                            ),
+                        )
+                        j_offsets = (
+                            min(
+                                write_iteration_offset.j_offsets[0],
+                                read_iteration_offset.j_offsets[0] + offset[1],
+                            ),
+                            max(
+                                write_iteration_offset.j_offsets[1],
+                                read_iteration_offset.j_offsets[1] + offset[1],
+                            ),
+                        )
+                    else:
+                        i_offsets = (
+                            read_iteration_offset.i_offsets[0] + offset[0],
+                            read_iteration_offset.i_offsets[1] + offset[0],
+                        )
+                        j_offsets = (
+                            read_iteration_offset.j_offsets[1] + offset[1],
+                            read_iteration_offset.j_offsets[1] + offset[1],
+                        )
+
+                    iteration_offsets[str(write_node.id_)] = oir.CartesianIterationOffset(
+                        i_offsets=i_offsets, j_offsets=j_offsets
+                    )
     if write_node.id_ not in iteration_offsets:
         iteration_offsets[str(write_node.id_)] = None
 
@@ -345,21 +388,37 @@ def _compute_iteration_offsets(
 ) -> Dict[str, Optional[oir.CartesianIterationOffset]]:
     nodes = nx.get_node_attributes(graph, "node")
     intervals = nx.get_node_attributes(graph, "interval")
-    excess_iterations: Dict[str, Optional[oir.CartesianIterationOffset]] = dict()
+    iteration_offsets: Dict[str, Optional[oir.CartesianIterationOffset]] = dict()
     from gtc.passes.oir_optimizations.utils import AccessCollector
-
-    for node in nodes.values():
-        access_collection = AccessCollector.apply(node)
-        if any(f.name in access_collection.write_fields() for f in stencil.params):
-            excess_iterations[node.id_] = oir.CartesianIterationOffset(
-                i_offsets=(0, 0), j_offsets=(0, 0)
-            )
-        else:
-            excess_iterations[node.id_] = None
 
     for id_ in reversed(list(nx.topological_sort(graph))):
         node = nodes[id_]
-        if id_ not in excess_iterations or excess_iterations[id_] is None:
+
+        access_collection = AccessCollector.apply(node)
+        if any(f.name in access_collection.write_fields() for f in stencil.params):
+            if node.id_ not in iteration_offsets:
+                iteration_offsets[node.id_] = oir.CartesianIterationOffset(
+                    i_offsets=(0, 0), j_offsets=(0, 0)
+                )
+            else:
+                iteration_offset = iteration_offsets[node.id_]
+                if iteration_offset is not None:
+                    i_offsets = (
+                        min(iteration_offset.i_offsets[0], 0),
+                        max(iteration_offset.i_offsets[1], 0),
+                    )
+                    j_offsets = (
+                        min(iteration_offset.j_offsets[0], 0),
+                        max(iteration_offset.j_offsets[1], 0),
+                    )
+                    iteration_offsets[node.id_] = oir.CartesianIterationOffset(
+                        i_offsets=i_offsets, j_offsets=j_offsets
+                    )
+
+        else:
+            iteration_offsets.setdefault(node.id_, None)
+
+        if id_ not in iteration_offsets or iteration_offsets[id_] is None:
             # this happens if no API output depends on this node (also not transitively) the
             # iteration space will be determined in a forward pass for completeness.
             continue
@@ -370,40 +429,41 @@ def _compute_iteration_offsets(
                 intervals[id_],
                 nodes[adj_id],
                 intervals[adj_id],
-                excess_iterations,
+                iteration_offsets,
             )
 
-    return excess_iterations
+    return iteration_offsets
 
 
 class OIRIterationSpaceTranslator(NodeTranslator):
     @classmethod
     def apply(cls, stencil: oir.Stencil) -> oir.Stencil:
         graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
-        excess_iterations = _compute_iteration_offsets(stencil, graph)
-        return cls().visit(stencil, graph=graph, excess_iterations=excess_iterations)
+        iteration_offsets = _compute_iteration_offsets(stencil, graph)
+        return cls().visit(stencil, graph=graph, iteration_offsets=iteration_offsets)
 
     def visit_HorizontalExecution(
         self,
         node: oir.HorizontalExecution,
-        excess_iterations: Dict[str, oir.CartesianIterationOffset],
+        iteration_offsets: Dict[str, oir.CartesianIterationOffset],
     ) -> oir.HorizontalExecution:
         return oir.HorizontalExecution(
             body=node.body,
             mask=node.mask,
-            iteration_space=excess_iterations[str(node.id_)],
+            declarations=node.declarations,
+            iteration_space=iteration_offsets[str(node.id_)],
         )
 
     def visit_VerticalLoop(
         self,
         node: oir.VerticalLoop,
         graph: nx.DiGraph,
-        excess_iterations: Dict[str, oir.CartesianIterationOffset],
+        iteration_offsets: Dict[str, oir.CartesianIterationOffset],
     ) -> oir.VerticalLoop:
         subgraph = graph.subgraph([he.id_ for he in node.horizontal_executions])
         subgraph_nodes = nx.get_node_attributes(subgraph, "node")
         horizontal_executions = list(
-            self.visit(subgraph_nodes[he], excess_iterations=excess_iterations)
+            self.visit(subgraph_nodes[he], iteration_offsets=iteration_offsets)
             for he in nx.topological_sort(subgraph)
         )
         return oir.VerticalLoop(

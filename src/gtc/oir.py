@@ -98,6 +98,14 @@ class CartesianIterationOffset(LocNode):
     i_offsets: Tuple[int, int]
     j_offsets: Tuple[int, int]
 
+    @validator("i_offsets", "j_offsets")
+    def offsets_ordered(cls, v: Tuple[int, int]) -> Tuple[int, int]:
+        if not v[0] <= v[1]:
+            raise ValueError(
+                "Lower bound of iteration offset must be less or equal to upper bound."
+            )
+        return v
+
 
 class Cast(common.Cast[Expr], Expr):  # type: ignore
     pass
