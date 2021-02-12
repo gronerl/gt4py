@@ -33,7 +33,7 @@ from gtc.common import (
     LoopOrder,
 )
 from gtc.gtir_to_oir import (
-    OIRHorizontalExecutionDependencyGraphBuilder,
+    build_horizontal_execution_dependency_graph,
     _compute_iteration_offsets,
     _dependency_expansion_backward,
 )
@@ -658,37 +658,53 @@ class TestIntervalMapping:
             assert observed is get_instance(expected)
 
 
-class TestGraphBuilder:
-    def test_write_write_dependency(self):
-        raise NotImplementedError
-
-    def test_write_write_no_overlap(self):
-        raise NotImplementedError
-
-    def test_write_write_partially_shadowed_by_read(self):
-        raise NotImplementedError
-
-    def test_write_write_shadowed_by_read(self):
-        raise NotImplementedError
-
-    def test_read_write_dependency(self):
-        raise NotImplementedError
-
-    def test_read_write_no_overlap(self):
-        raise NotImplementedError
-
-    def test_independent_nodes(self):
-        raise NotImplementedError
-
-    def test_vertical_loop_ignored(self):
-        raise NotImplementedError
-
-    def test_no_dependencies_no_edges(self):
-        raise NotImplementedError
-
-
 class TestIterationOffsetComputationUtils:
     class TestDependencyExpansion:
+        def test_masked_write_not_considered_overwrite(self):
+            write_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                declarations=[],
+            )
+            read_node = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                mask=FieldAccess(
+                    name="mask", offset=CartesianOffset(i=0, j=0, k=0), dtype=DataType.BOOL
+                ),
+                declarations=[],
+            )
+
+            iteration_offsets = {
+                read_node.id_: CartesianIterationOffset(i_offsets=(0, 0), j_offsets=(0, 0))
+            }
+            _dependency_expansion_backward(
+                read_node,
+                Interval(start=AxisBound.start(), end=AxisBound.end()),
+                write_node,
+                Interval(start=AxisBound.start(), end=AxisBound.end()),
+                iteration_offsets,
+            )
+            assert write_node.id_ in iteration_offsets
+            assert iteration_offsets[write_node.id_].i_offsets == (0, 0)
+            assert iteration_offsets[write_node.id_].j_offsets == (0, 0)
+
         def test_k_offset_not_considered_shadowed(self):
             write_node = HorizontalExecution(
                 declarations=[],
@@ -905,7 +921,7 @@ class TestIterationOffsetComputationUtils:
                 [
                     [(-3, -7, 0), (1, 2, 1), (3, 3, 2)],
                     [],
-                    ((1, 1), (2, 2)),
+                    ((0, 0), (0, 0)),
                     Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
                     Interval(start=AxisBound.start(), end=AxisBound.from_start(1)),
                 ],
@@ -926,7 +942,7 @@ class TestIterationOffsetComputationUtils:
                 [
                     [(-3, -7, 0), (1, 2, -1), (3, 3, -2)],
                     [],
-                    ((1, 1), (2, 2)),
+                    ((0,0),(0,0)),
                     Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
                     Interval(start=AxisBound.from_start(2), end=AxisBound.from_start(3)),
                 ],
@@ -942,7 +958,7 @@ class TestIterationOffsetComputationUtils:
                     [
                         (1, 2, -1),
                     ],
-                    ((1, 1), (2, 2)),
+                    ((0,0),(0,0)),
                     Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
                     Interval(start=AxisBound.from_start(2), end=AxisBound.from_start(3)),
                 ],
@@ -1188,76 +1204,67 @@ class TestIterationOffsetComputationUtils:
             initial_iteration_offset,
             result_iteration_offset,
         ):
-
-            write_node = HorizontalExecution(
+            write1 = HorizontalExecution(
                 body=[
                     AssignStmt(
-                        left=FieldAccess(name="tmp1", offset=CartesianOffset(i=0, j=0, k=0)),
+                        left=FieldAccess(
+                            name="out1",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
                         right=Literal(value="1.0", dtype=DataType.FLOAT64),
                     )
                 ],
-                mask=None,
-                iteration_space=None,
                 declarations=[],
             )
-            write_node_interval = Interval(start=AxisBound.start(), end=AxisBound.end())
-
-            read_expression = FieldAccess(
-                name="tmp1",
-                offset=CartesianOffset(**{k: v for k, v in zip("ijk", read_offsets[0])}),
-            )
-            for offset in read_offsets[1:]:
-                read_expression = BinaryOp(
-                    op=ArithmeticOperator.ADD,
-                    left=read_expression,
-                    right=FieldAccess(
-                        name="tmp1", offset=CartesianOffset(**{k: v for k, v in zip("ijk", offset)})
-                    ),
-                )
-
-            read_node = HorizontalExecution(
+            write2 = HorizontalExecution(
                 body=[
                     AssignStmt(
-                        left=FieldAccess(name="tmp2", offset=CartesianOffset(i=0, j=0, k=0)),
-                        right=read_expression,
+                        left=FieldAccess(
+                            name="out2",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=BinaryOp(
+                            op=ArithmeticOperator.ADD,
+                            left=FieldAccess(
+                                name="out1",
+                                offset=CartesianOffset(i=1, j=0, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                            right=FieldAccess(
+                                name="out1",
+                                offset=CartesianOffset(i=-1, j=0, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                            dtype=DataType.FLOAT64,
+                        ),
                     )
                 ],
-                mask=None,
-                iteration_space=None,
                 declarations=[],
             )
-            read_node_interval = Interval(start=AxisBound.start(), end=AxisBound.end())
+            vertical_loop = VerticalLoop(
+                interval=Interval(start=AxisBound.start(), end=AxisBound.end()),
+                horizontal_executions=[write1, write2],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[],
+            )
+            params = [
+                FieldDecl(name="out1", dtype=DataType.FLOAT64),
+                FieldDecl(name="out2", dtype=DataType.FLOAT64),
+            ]
+            stencil = Stencil(name="test", params=params, vertical_loops=[vertical_loop])
+            graph = build_horizontal_execution_dependency_graph(stencil)
+            assert len(graph.edges) == 1
+            assert (write1.id_, write2.id_) in graph.edges
 
-            initial_iteration_offset = (
-                CartesianIterationOffset(
-                    i_offsets=initial_iteration_offset[0], j_offsets=initial_iteration_offset[1]
-                )
-                if initial_iteration_offset is not None
-                else None
-            )
-            dependent_iteration_offset = (
-                CartesianIterationOffset(
-                    i_offsets=dependent_iteration_offset[0], j_offsets=dependent_iteration_offset[1]
-                )
-                if dependent_iteration_offset is not None
-                else None
-            )
-            iteration_offset_dict = {
-                write_node.id_: initial_iteration_offset,
-                read_node.id_: dependent_iteration_offset,
-            }
-            _dependency_expansion_backward(
-                read_node,
-                read_node_interval,
-                write_node,
-                write_node_interval,
-                iteration_offset_dict,
-            )
-            assert write_node.id_ in iteration_offset_dict
-            assert iteration_offset_dict[write_node.id_].i_offsets == result_iteration_offset[0]
-            assert iteration_offset_dict[write_node.id_].j_offsets == result_iteration_offset[1]
+            res = _compute_iteration_offsets(stencil, graph)
+            assert res[write1.id_].i_offsets == (-1, 1)
+            assert res[write1.id_].j_offsets == (0, 0)
+            assert res[write2.id_].i_offsets == (0, 0)
+            assert res[write2.id_].j_offsets == (0, 0)
 
-    class TestComputeIterationOffsets:
+    class TestGraphBuilderAndComputeIterationOffsets:
         def test_double_outputs(self):
             write1 = HorizontalExecution(
                 body=[
@@ -1308,10 +1315,8 @@ class TestIterationOffsetComputationUtils:
                 FieldDecl(name="out1", dtype=DataType.FLOAT64),
                 FieldDecl(name="out2", dtype=DataType.FLOAT64),
             ]
-            stencil = Stencil(
-                name="test_double_outputs", params=params, vertical_loops=[vertical_loop]
-            )
-            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            stencil = Stencil(name="test", params=params, vertical_loops=[vertical_loop])
+            graph = build_horizontal_execution_dependency_graph(stencil)
             assert len(graph.edges) == 1
             assert (write1.id_, write2.id_) in graph.edges
 
@@ -1358,11 +1363,11 @@ class TestIterationOffsetComputationUtils:
                 FieldDecl(name="out", dtype=DataType.FLOAT64),
             ]
             stencil = Stencil(
-                name="test_independent_component_none",
+                name="test",
                 params=params,
                 vertical_loops=[vertical_loop],
             )
-            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            graph = build_horizontal_execution_dependency_graph(stencil)
             assert len(graph.edges) == 0
 
             res = _compute_iteration_offsets(stencil, graph)
@@ -1458,11 +1463,11 @@ class TestIterationOffsetComputationUtils:
                 FieldDecl(name="out", dtype=DataType.FLOAT64),
             ]
             stencil = Stencil(
-                name="test_dead_end_none",
+                name="test",
                 params=params,
                 vertical_loops=[vertical_loop],
             )
-            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            graph = build_horizontal_execution_dependency_graph(stencil)
             assert len(graph.edges) == 4
             assert (write1.id_, independent1.id_) in graph.edges
             assert (write1.id_, independent2.id_) in graph.edges
@@ -1476,7 +1481,7 @@ class TestIterationOffsetComputationUtils:
             assert res[independent2.id_] is None
             assert res[independent3.id_] is None
 
-        def test_intervals_interlock(self):
+        def test_stack_nooverlap(self):
             tmp1 = VerticalLoop(
                 interval=Interval(start=AxisBound.start(), end=AxisBound.end()),
                 horizontal_executions=[
@@ -1626,11 +1631,11 @@ class TestIterationOffsetComputationUtils:
                 Temporary(name="tmp2", dtype=DataType.FLOAT64),
             ]
             stencil = Stencil(
-                name="test_dag_stack",
+                name="test",
                 params=params,
                 vertical_loops=[tmp1, tmp2, tmp3, write1, write2, write3],
             )
-            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            graph = build_horizontal_execution_dependency_graph(stencil)
             assert len(graph.edges) == 5
             assert (
                 tmp1.horizontal_executions[0].id_,
@@ -1664,10 +1669,10 @@ class TestIterationOffsetComputationUtils:
             assert res[write3.horizontal_executions[0].id_].i_offsets == (0, 0)
             assert res[write3.horizontal_executions[0].id_].j_offsets == (0, 0)
 
-            assert res[tmp3.horizontal_executions[0].id_].i_offsets == (0, 1)
+            assert res[tmp3.horizontal_executions[0].id_].i_offsets == (1, 1)
             assert res[tmp3.horizontal_executions[0].id_].j_offsets == (0, 0)
 
-            assert res[tmp2.horizontal_executions[0].id_].i_offsets == (0, 2)
+            assert res[tmp2.horizontal_executions[0].id_].i_offsets == (2, 2)
             assert res[tmp2.horizontal_executions[0].id_].j_offsets == (0, 0)
 
             assert res[tmp1.horizontal_executions[0].id_].i_offsets == (0, 2)
@@ -1714,10 +1719,8 @@ class TestIterationOffsetComputationUtils:
             params = [
                 FieldDecl(name="out", dtype=DataType.FLOAT64),
             ]
-            stencil = Stencil(
-                name="test_masks_are_read", params=params, vertical_loops=[vertical_loop]
-            )
-            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            stencil = Stencil(name="test", params=params, vertical_loops=[vertical_loop])
+            graph = build_horizontal_execution_dependency_graph(stencil)
             assert len(graph.edges) == 1
             assert (write1.id_, write2.id_) in graph.edges
 
@@ -1815,11 +1818,11 @@ class TestIterationOffsetComputationUtils:
                 FieldDecl(name="out", dtype=DataType.FLOAT64),
             ]
             stencil = Stencil(
-                name="test_dag_stack",
+                name="test",
                 params=params,
                 vertical_loops=[vertical_loop],
             )
-            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            graph = build_horizontal_execution_dependency_graph(stencil)
             assert len(graph.edges) == 4
             assert (tmp1.id_, tmp2.id_) in graph.edges
             assert (tmp1.id_, tmp3.id_) in graph.edges
@@ -1878,11 +1881,11 @@ class TestIterationOffsetComputationUtils:
                 FieldDecl(name="out", dtype=DataType.FLOAT64),
             ]
             stencil = Stencil(
-                name="test_none_propagates",
+                name="test",
                 params=params,
                 vertical_loops=[vertical_loop],
             )
-            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            graph = build_horizontal_execution_dependency_graph(stencil)
             assert len(graph.edges) == 1
             assert (write1.id_, write2.id_) in graph.edges
 
@@ -1993,11 +1996,11 @@ class TestIterationOffsetComputationUtils:
                 FieldDecl(name="out", dtype=DataType.FLOAT64),
             ]
             stencil = Stencil(
-                name="test_none_propagates",
+                name="test",
                 params=params,
                 vertical_loops=[vertical_loop],
             )
-            graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+            graph = build_horizontal_execution_dependency_graph(stencil)
             assert len(graph.edges) == 5
             assert (tmp1.id_, tmp2.id_) in graph.edges
             assert (tmp1.id_, tmp3.id_) in graph.edges
@@ -2014,3 +2017,142 @@ class TestIterationOffsetComputationUtils:
             assert res[tmp1.id_] is None
             assert res[tmp2.id_] is None
             assert res[tmp3.id_] is None
+
+        def test_double_read_then_write_double_dependency(self):
+            read1 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp1",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                    )
+                ],
+                declarations=[],
+            )
+            read2 = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp2",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                    )
+                ],
+                declarations=[],
+            )
+            write = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="2.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                declarations=[],
+            )
+            vertical_loop = VerticalLoop(
+                interval=Interval(start=AxisBound.start(), end=AxisBound.end()),
+                horizontal_executions=[read1, read2, write],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[
+                    Temporary(name="tmp1", dtype=DataType.FLOAT64),
+                    Temporary(name="tmp2", dtype=DataType.FLOAT64),
+                ],
+            )
+            params = [
+                FieldDecl(name="out", dtype=DataType.FLOAT64),
+            ]
+            stencil = Stencil(name="test", params=params, vertical_loops=[vertical_loop])
+            graph = build_horizontal_execution_dependency_graph(stencil)
+            assert len(graph.edges) == 2
+            assert (read1.id_, write.id_) in graph.edges
+            assert (read2.id_, write.id_) in graph.edges
+
+            res = _compute_iteration_offsets(stencil, graph)
+            assert res[read1.id_] is None
+            assert res[read2.id_] is None
+            assert res[write.id_].i_offsets == (0, 0)
+            assert res[write.id_].j_offsets == (0, 0)
+
+        def test_skip_interval(self):
+            write = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="tmp",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=Literal(value="1.0", dtype=DataType.FLOAT64),
+                    )
+                ],
+                declarations=[],
+            )
+            read = HorizontalExecution(
+                body=[
+                    AssignStmt(
+                        left=FieldAccess(
+                            name="out",
+                            offset=CartesianOffset(i=0, j=0, k=0),
+                            dtype=DataType.FLOAT64,
+                        ),
+                        right=BinaryOp(
+                            op=ArithmeticOperator.ADD,
+                            left=FieldAccess(
+                                name="tmp",
+                                offset=CartesianOffset(i=0, j=0, k=0),
+                                dtype=DataType.FLOAT64,
+                            ),
+                            right=FieldAccess(
+                                name="tmp",
+                                offset=CartesianOffset(i=1, j=0, k=2),
+                                dtype=DataType.FLOAT64,
+                            ),
+                            dtype=DataType.FLOAT64,
+                        ),
+                    )
+                ],
+                declarations=[],
+            )
+            vertical_loop_write = VerticalLoop(
+                interval=Interval(start=AxisBound.from_start(1), end=AxisBound.from_start(2)),
+                horizontal_executions=[write],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[],
+            )
+            vertical_loop_read = VerticalLoop(
+                interval=Interval(start=AxisBound.start(), end=AxisBound.from_start(1)),
+                horizontal_executions=[read],
+                loop_order=LoopOrder.PARALLEL,
+                declarations=[],
+            )
+            params = [
+                Temporary(name="tmp", dtype=DataType.FLOAT64),
+                FieldDecl(name="out", dtype=DataType.FLOAT64),
+            ]
+            stencil = Stencil(
+                name="test", params=params, vertical_loops=[vertical_loop_write, vertical_loop_read]
+            )
+            graph = build_horizontal_execution_dependency_graph(stencil)
+            assert len(graph.edges) == 0
+
+            res = _compute_iteration_offsets(stencil, graph)
+            assert res[read.id_].i_offsets == (0, 0)
+            assert res[read.id_].j_offsets == (0, 0)
+            assert res[write.id_] is None

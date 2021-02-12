@@ -300,7 +300,7 @@ class IntervalMapping:
         self.values.append(value)
         return
 
-    def __getitem__(self, key: Interval) -> Any:
+    def __getitem__(self, key: Interval) -> List[Any]:
         if not isinstance(key, Interval):
             raise TypeError("Only OIR intervals supported for keys of IntervalMapping.")
 

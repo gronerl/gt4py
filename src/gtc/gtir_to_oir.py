@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import networkx as nx
 
-from eve import NodeTranslator, NodeVisitor
+from eve import NodeTranslator, NodeVisitor, NOTHING
 from gtc import gtir, oir
 from gtc.common import CartesianOffset, DataType, LogicalOperator, UnaryOperator
 from gtc.passes.oir_optimizations.utils import AccessCollector
@@ -48,7 +48,8 @@ def _create_mask(ctx: "GTIRToOIR.Context", name: str, cond: oir.Expr) -> oir.Tem
 
 def gtir_to_oir(gtir: gtir.Stencil) -> oir.Stencil:
     oir_no_iteration_space = GTIRToOIR().visit(gtir)
-    stencil = OIRIterationSpaceTranslator.apply(oir_no_iteration_space)
+    oir_with_none_extents = OIRIterationSpaceTranslator.apply(oir_no_iteration_space)
+    stencil = OIRPruneNodesWithNoneExtentTranslator().visit(oir_with_none_extents)
     return stencil
 
 
@@ -197,7 +198,9 @@ class GTIRToOIR(NodeTranslator):
         )
 
 
-class OIRHorizontalExecutionDependencyGraphBuilder(NodeVisitor):
+def build_horizontal_execution_dependency_graph(stencil: oir.Stencil):
+    from eve.iterators import iter_tree, TraversalOrder
+
     class ReadWriteContext:
         writes: Dict[str, oir.IntervalMapping]
         accesses: Dict[str, oir.IntervalMapping]
@@ -235,35 +238,29 @@ class OIRHorizontalExecutionDependencyGraphBuilder(NodeVisitor):
             else:
                 return set()
 
-    def visit_HorizontalExecution(
-        self,
+    def _visit_horizontal_execution_forward(
         node: oir.HorizontalExecution,
-        *,
         interval: oir.Interval,
         graph: nx.Graph,
-        context: "OIRHorizontalExecutionDependencyGraphBuilder.ReadWriteContext",
+        context: ReadWriteContext,
     ) -> None:
         graph.add_node(node.id_, node=node, interval=interval)
 
         access_collection = AccessCollector.apply(node)
 
-        read_k_intervals: Dict[str, oir.Interval] = dict()
+        read_k_intervals: List[Tuple[str, oir.Interval]] = list()
         for name, offsets in access_collection.read_offsets().items():
-            offsets_iter = iter(offsets)
-            o = next(offsets_iter)
-            min_k_offset = o[2]
-            max_k_offset = o[2]
-            for o in offsets_iter:
-                min_k_offset = min(o[2], min_k_offset) if min_k_offset is not None else o[2]
-                max_k_offset = max(o[2], max_k_offset) if max_k_offset is not None else o[2]
-            start = oir.AxisBound(
-                level=interval.start.level, offset=interval.start.offset + min_k_offset
-            )
-            end = oir.AxisBound(level=interval.end.level, offset=interval.end.offset + max_k_offset)
-            read_k_intervals[name] = oir.Interval(start=start, end=end)
+            for offset in offsets:
+                start = oir.AxisBound(
+                    level=interval.start.level, offset=interval.start.offset + offset[2]
+                )
+                end = oir.AxisBound(
+                    level=interval.end.level, offset=interval.end.offset + offset[2]
+                )
+                read_k_intervals.append((name, oir.Interval(start=start, end=end)))
 
         dependencies: Dict[str, Set[oir.HorizontalExecution]] = dict()
-        for name, read_interval in read_k_intervals.items():
+        for name, read_interval in read_k_intervals:
             for n in context.get_writes(name, read_interval):
                 if name not in dependencies:
                     dependencies[name] = set()
@@ -278,18 +275,61 @@ class OIRHorizontalExecutionDependencyGraphBuilder(NodeVisitor):
             for id_ in ids:
                 graph.add_edge(id_, node.id_)
 
-        for name, read_interval in read_k_intervals.items():
+        for name, read_interval in read_k_intervals:
             context.set_read(name, read_interval, node)
         for name in access_collection.write_fields():
             context.set_write(name, interval, node)
 
-    def visit_VerticalLoop(self, node: oir.VerticalLoop, **kwargs: Dict[str, Any]) -> None:
-        interval = node.interval
-        self.generic_visit(node, interval=interval, **kwargs)
+    def _visit_horizontal_execution_backward(
+        node: oir.HorizontalExecution,
+        interval: oir.Interval,
+        graph: nx.Graph,
+        context: Dict[str, oir.IntervalMapping],
+    ) -> None:
 
-    def visit_Stencil(self, node: oir.Stencil, *, graph: nx.DiGraph) -> None:
-        context = OIRHorizontalExecutionDependencyGraphBuilder.ReadWriteContext()
-        self.generic_visit(node, graph=graph, context=context)
+        access_collection = AccessCollector.apply(node)
+        read_k_intervals: List[Tuple[str, oir.Interval]] = list()
+        for name, offsets in access_collection.read_offsets().items():
+            for offset in offsets:
+                start = oir.AxisBound(
+                    level=interval.start.level, offset=interval.start.offset + offset[2]
+                )
+                end = oir.AxisBound(
+                    level=interval.end.level, offset=interval.end.offset + offset[2]
+                )
+                read_k_intervals.append((name, oir.Interval(start=start, end=end)))
+
+        dependencies: Dict[str, Set[oir.HorizontalExecution]] = dict()
+        for name, read_interval in read_k_intervals:
+            if name not in dependencies:
+                dependencies[name] = set()
+            ids = [n.id_ for n in context[name][read_interval]] if name in context else []
+            dependencies[name].update(ids)
+
+        for ids in dependencies.values():
+            for id_ in ids:
+                graph.add_edge(node.id_,id_)
+
+        for name in access_collection.write_fields():
+            if name not in context:
+                context[name] = oir.IntervalMapping()
+            context[name][interval] = node
+
+    graph = nx.DiGraph()
+    interval: oir.Interval = oir.Interval(start=oir.AxisBound.start(), end=oir.AxisBound.end())
+    context = ReadWriteContext()
+    horizontal_executions = list()
+    for node in iter_tree(stencil, TraversalOrder.PRE_ORDER):
+        if isinstance(node, oir.VerticalLoop):
+            interval = node.interval
+        elif isinstance(node, oir.HorizontalExecution):
+            horizontal_executions.append((node, interval))
+            _visit_horizontal_execution_forward(node, interval, graph, context)
+
+    context=dict()
+    for node, interval in reversed(horizontal_executions):
+        _visit_horizontal_execution_backward(node, interval, graph, context)
+    return graph
 
     @classmethod
     def apply(cls, node: oir.Stencil) -> nx.DiGraph:
@@ -313,9 +353,9 @@ def _dependency_expansion_backward(
     if read_iteration_offset is not None:
 
         for name in (
-            read_node_access_collection.read_fields() & write_node_access_collection.write_fields()
+            read_node_access_collection.fields() & write_node_access_collection.write_fields()
         ):
-            read_offsets = read_node_access_collection.read_offsets()[name]
+            read_offsets = read_node_access_collection.read_offsets().get(name, set())
 
             is_write_before_read = False
             collections = []
@@ -338,10 +378,21 @@ def _dependency_expansion_backward(
                     break
                 elif name in collection.write_fields():
                     is_write_before_read = True
-            if is_write_before_read and all(ro[2] == 0 for ro in read_offsets):
+            if (
+                is_write_before_read
+                and all(ro[2] == 0 for ro in read_offsets)
+                and read_node.mask is None
+            ):
                 continue
 
-            for offset in read_offsets:
+            if len(read_offsets) == 0:
+                offsets = {(0, 0, 0)}
+            else:
+                offsets = read_offsets
+
+            for offset in offsets:
+                if offset[2] !=0:
+                    offset = (0, 0, offset[2])
                 read_interval = read_node_interval.shift(offset[2])
                 if read_interval.intersects(write_node_interval):
                     write_iteration_offset = iteration_offsets.get(str(write_node.id_), None)
@@ -395,7 +446,10 @@ def _compute_iteration_offsets(
         node = nodes[id_]
 
         access_collection = AccessCollector.apply(node)
-        if any(f.name in access_collection.write_fields() for f in stencil.params):
+        if any(
+            f.name in access_collection.write_fields() and isinstance(f, oir.FieldDecl)
+            for f in stencil.params
+        ):
             if node.id_ not in iteration_offsets:
                 iteration_offsets[node.id_] = oir.CartesianIterationOffset(
                     i_offsets=(0, 0), j_offsets=(0, 0)
@@ -434,11 +488,23 @@ def _compute_iteration_offsets(
 
     return iteration_offsets
 
+class OIRPruneNodesWithNoneExtentTranslator(NodeTranslator):
+    def visit_VerticalLoop(self, node: oir.VerticalLoop):
+        res = self.generic_visit(node)
+        if len(res.horizontal_executions) is None:
+            return NOTHING
+        return res
+
+    def visit_HorizontalExecution(self, node: oir.HorizontalExecution):
+        if node.iteration_space is None:
+            return NOTHING
+        else:
+            return self.generic_visit(node)
 
 class OIRIterationSpaceTranslator(NodeTranslator):
     @classmethod
     def apply(cls, stencil: oir.Stencil) -> oir.Stencil:
-        graph = OIRHorizontalExecutionDependencyGraphBuilder.apply(stencil)
+        graph = build_horizontal_execution_dependency_graph(stencil)
         iteration_offsets = _compute_iteration_offsets(stencil, graph)
         return cls().visit(stencil, graph=graph, iteration_offsets=iteration_offsets)
 
