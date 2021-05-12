@@ -22,6 +22,8 @@ definitions for the keywords of the DSL.
 
 import collections
 import inspect
+import itertools
+import operator
 import types
 
 import numpy as np
@@ -263,6 +265,100 @@ def stencil(
         return _decorator
     else:
         return _decorator(definition)
+
+
+import dace
+
+
+def as_sdfg(*args, **kwargs) -> dace.SDFG:
+    def _decorator(definition_func):
+        from gt4py.backend.gtc_backend.defir_to_gtir import DefIRToGTIR
+        from gt4py.definitions import BuildOptions
+        from gt4py.frontend.gtscript_frontend import GTScriptFrontend
+        from gtc.dace.oir_to_dace import OirSDFGBuilder
+        from gtc.dace.utils import array_dimensions
+        from gtc.gtir_to_oir import GTIRToOIR
+        from gtc.passes.gtir_pipeline import GtirPipeline
+
+        definition_ir = GTScriptFrontend.generate(
+            definition_func,
+            externals=kwargs,
+            options=BuildOptions(
+                name=definition_func.__name__,
+                module=inspect.currentframe().f_back.f_globals["__name__"],
+            ),
+        )
+        gt_ir = DefIRToGTIR.apply(definition_ir)
+        gt_ir = GtirPipeline(gt_ir).full()
+        oir = GTIRToOIR().visit(gt_ir)
+        import dace
+
+        from gtc.passes.oir_dace_optimizations import GraphMerging, optimize_horizontal_executions
+        from gtc.passes.oir_optimizations.caches import (
+            IJCacheDetection,
+            KCacheDetection,
+            PruneKCacheFills,
+            PruneKCacheFlushes,
+        )
+        from gtc.passes.oir_optimizations.horizontal_execution_merging import (
+            GreedyMerging,
+            OnTheFlyMerging,
+        )
+        from gtc.passes.oir_optimizations.pruning import NoFieldAccessPruning
+        from gtc.passes.oir_optimizations.temporaries import (
+            LocalTemporariesToScalars,
+            WriteBeforeReadTemporariesToScalars,
+        )
+        from gtc.passes.oir_optimizations.vertical_loop_merging import AdjacentLoopMerging
+
+        # oir = optimize_horizontal_executions(oir, GraphMerging)
+        oir = GreedyMerging().visit(oir)
+        oir = AdjacentLoopMerging().visit(oir)
+        oir = LocalTemporariesToScalars().visit(oir)
+        oir = WriteBeforeReadTemporariesToScalars().visit(oir)
+        oir = OnTheFlyMerging().visit(oir)
+        oir = NoFieldAccessPruning().visit(oir)
+        oir = IJCacheDetection().visit(oir)
+        oir = KCacheDetection().visit(oir)
+        oir = PruneKCacheFills().visit(oir)
+        oir = PruneKCacheFlushes().visit(oir)
+
+        sdfg: dace.SDFG = OirSDFGBuilder().visit(oir)
+        sdfg.expand_library_nodes(recursive=True)
+        sdfg.apply_strict_transformations()
+
+        import dace.data
+
+        for name, array in sdfg.arrays.items():
+            if isinstance(array, dace.data.Array) and array.transient:
+                array.lifetime = dace.AllocationLifetime.SDFG
+                dims = array_dimensions(array)
+                ndim = len(array.shape)
+                spatial_ndim = sum(dims)
+                data_ndim = len(array.shape) - spatial_ndim
+                strides = list(
+                    reversed(
+                        list(
+                            itertools.accumulate(
+                                reversed(array.shape), func=operator.mul, initial=1
+                            )
+                        )
+                    )
+                )[1:]
+                for i in range(data_ndim):
+                    sdfg.replace(f"__{name}_d{i}_stride", strides[spatial_ndim + i])
+                    sdfg.remove_symbol(f"__{name}_d{i}_stride")
+                filtered_dims = [v for i, v in enumerate("IJK") if dims[i]]
+                for i, var in reversed(list(enumerate(filtered_dims))):
+                    sdfg.replace(f"__{name}_{var}_stride", strides[i])
+                    sdfg.remove_symbol(f"__{name}_{var}_stride")
+        sdfg.arg_names = [a.name for a in definition_ir.api_signature]
+        return sdfg
+
+    if not kwargs and len(args) == 1:
+        return _decorator(args[0])
+    else:
+        return _decorator
 
 
 def lazy_stencil(
