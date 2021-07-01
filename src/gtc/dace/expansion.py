@@ -76,6 +76,13 @@ class TaskletCodegen(codegen.TemplatedGenerator):
 
     TernaryOp = as_fmt("({true_expr} if {cond} else {false_expr})")
 
+    def visit_For(self, node: oir.For, **kwargs):
+        guard_str = f"for __loopvar__{node.target_name} in range({self.visit(node.start)}, {self.visit(node.end)}, {self.visit(node.inc)}):"
+        indent = "    "
+        body_code = self.visit(node.body, targets=kwargs["targets"])
+        body_code = [indent + b for b in body_code]
+        return "\n".join([guard_str] + body_code)
+
     def visit_BuiltInLiteral(self, builtin: common.BuiltInLiteral, **kwargs: Any) -> str:
         if builtin == common.BuiltInLiteral.TRUE:
             return "True"
@@ -564,7 +571,9 @@ class NaiveHorizontalExecutionExpander(OIRLibraryNodeExpander):
             out_memlets[acc_name] = dace.memlet.Memlet.simple(
                 name,
                 ",".join(subset_strs),
-                dynamic=any(isinstance(stmt, oir.MaskStmt) for stmt in self.node.oir_node.body),
+                dynamic=any(
+                    isinstance(stmt, (oir.MaskStmt, oir.For)) for stmt in self.node.oir_node.body
+                ),
             )
 
         return in_memlets, out_memlets
