@@ -77,7 +77,7 @@ class TaskletCodegen(codegen.TemplatedGenerator):
     TernaryOp = as_fmt("({true_expr} if {cond} else {false_expr})")
 
     def visit_For(self, node: oir.For, **kwargs):
-        guard_str = f"for __loopvar__{node.target_name} in range({self.visit(node.start)}, {self.visit(node.end)}, {self.visit(node.inc)}):"
+        guard_str = f"for {node.target_name} in range({self.visit(node.start)}, {self.visit(node.end)}, {self.visit(node.inc)}):"
         indent = "    "
         body_code = self.visit(node.body, targets=kwargs["targets"])
         body_code = [indent + b for b in body_code]
