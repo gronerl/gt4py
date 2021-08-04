@@ -128,6 +128,10 @@ class VectorTernaryOp(common.TernaryOp[VectorExpression], VectorExpression):
     pass
 
 
+class HorizontalMask(common.HorizontalMask):
+    pass
+
+
 class VectorAssign(common.AssignStmt[VectorLValue, VectorExpression], VectorExpression):
     left: VectorLValue
     right: VectorExpression
@@ -140,8 +144,13 @@ class MaskBlock(common.Stmt):
     body: List[VectorAssign]
 
 
+class HorizontalMaskBlock(common.Stmt):
+    mask: HorizontalMask
+    body: List[VectorAssign]
+
+
 class HorizontalBlock(common.LocNode):
-    body: List[Union[VectorAssign, MaskBlock]]
+    body: List[Union[VectorAssign, MaskBlock, HorizontalMaskBlock]]
 
 
 class VerticalPass(common.LocNode):
