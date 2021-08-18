@@ -145,7 +145,7 @@ def test_generate_post_run(backend_name, mode):
 @pytest.mark.parametrize("backend_name", GPU_BACKENDS)
 @pytest.mark.parametrize("mode", (2,))
 @pytest.mark.parametrize("device_sync", (True, False))
-def test_device_sync_option(backend_name, mode, device_sync):
+def test_device_sync_option_effective(backend_name, mode, device_sync):
     backend_cls = backend_registry[backend_name]
     builder = StencilBuilder(stencil_def, backend=backend_cls).with_externals({"MODE": mode})
     builder.options.backend_opts["device_sync"] = device_sync
@@ -165,6 +165,16 @@ def test_device_sync_option(backend_name, mode, device_sync):
         assert "cupy.cuda.Device(0).synchronize()" in source
     else:
         assert "cupy.cuda.Device(0).synchronize()" not in source
+
+
+@pytest.mark.parametrize("backend_name", GPU_BACKENDS)
+def test_device_sync_option_registered(backend_name):
+    backend_cls = backend_registry[backend_name]
+    backend_opts = backend_cls.options
+    option_name = "device_sync"
+    assert option_name in backend_opts
+    assert backend_opts[option_name]["versioning"]
+    assert backend_opts[option_name]["type"] is bool
 
 
 if __name__ == "__main__":
