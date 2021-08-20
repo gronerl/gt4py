@@ -301,12 +301,16 @@ class BaseOirSDFGBuilder(ABC):
                     dace.symbolic.pystr_to_symbolic(f"__{name}_d{dim}_stride")
                     for dim, _ in enumerate(decl.data_dims)
                 )
+                print(name, dtype)
                 self._sdfg.add_array(
                     name,
                     dtype=dtype,
                     shape=shapes[name],
                     strides=strides,
                     transient=isinstance(decl, Temporary) and self.has_transients,
+                    lifetime=dace.AllocationLifetime.Persistent
+                    if isinstance(decl, Temporary)
+                    else dace.AllocationLifetime.Scope,
                 )
 
     def add_subsets(self):

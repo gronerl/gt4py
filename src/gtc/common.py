@@ -730,9 +730,9 @@ def data_type_to_typestr(dtype: DataType) -> str:
         DataType.INT8: "int8",
         DataType.INT16: "int16",
         DataType.INT32: "int32",
-        DataType.INT64: "int64",
+        DataType.INT64: "int32",
         DataType.FLOAT32: "float32",
-        DataType.FLOAT64: "float64",
+        DataType.FLOAT64: "float32",
     }
     if not isinstance(dtype, DataType):
         raise TypeError("Can only convert instances of DataType to typestr.")

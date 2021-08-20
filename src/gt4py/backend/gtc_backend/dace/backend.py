@@ -65,12 +65,12 @@ class GTCDaCeExtGenerator:
             for node, _ in sdfg.all_nodes_recursive():
                 if isinstance(node, VerticalLoopLibraryNode):
                     node.implementation = "block"
-                    node.default_storage_type = dace.StorageType.GPU_Global
+                    node.default_storage_type = dace.StorageType.GPU_Shared
                     node.map_schedule = dace.ScheduleType.Sequential
                     node.tiling_map_schedule = dace.ScheduleType.GPU_Device
                     for _, section in node.sections:
                         for array in section.arrays.values():
-                            array.storage = dace.StorageType.GPU_Global
+                            array.storage = dace.StorageType.GPU_Shared
                         for node, _ in section.all_nodes_recursive():
                             if isinstance(node, HorizontalExecutionLibraryNode):
                                 node.map_schedule = dace.ScheduleType.GPU_ThreadBlock
@@ -261,7 +261,7 @@ class DaCeComputationCodegen:
                 const int __J = domain[1];
                 const int __K = domain[2];
                 ${name}_t dace_handle;
-                auto allocator = gt::sid::make_cached_allocator(&std::make_unique<char[]>);
+                auto allocator = gt::sid::make_cached_allocator(&${allocator}<char[]>);
                 ${"\\n".join(tmp_allocs)}
                 __program_${name}(${",".join(["&dace_handle", *dace_args])});
             };
@@ -289,10 +289,16 @@ class DaCeComputationCodegen:
         for i, line in reversed(list(enumerate(lines))):
             if '#include "../../include/hash.h' in line:
                 lines = lines[0:i] + lines[i + 1 :]
-        if "CUDA" in {co.title for co in code_objects}:
+
+        is_gpu = "CUDA" in {co.title for co in code_objects}
+        if is_gpu:
             for i, line in enumerate(lines):
                 if line.strip() == f"struct {sdfg.name}_t {{":
-                    lines = lines[0:i] + lines[i + 3 :]
+                    j = i + 1
+                    while lines[j].strip() != "dace::cuda::Context *gpu_context;":
+                        j += 1
+
+                    lines = lines[0:i] + lines[j + 2 :]
                     break
 
             for i, line in enumerate(lines):
@@ -312,10 +318,12 @@ class DaCeComputationCodegen:
             dace_args=self.generate_dace_args(gtir, sdfg),
             functor_args=self.generate_functor_args(sdfg),
             tmp_allocs=self.generate_tmp_allocs(sdfg),
+            allocator="gt::cuda_util::cuda_malloc" if is_gpu else "std::make_unique",
         )
         generated_code = f"""#include <gridtools/sid/sid_shift_origin.hpp>
                              #include <gridtools/sid/allocator.hpp>
                              #include <gridtools/stencil/cartesian.hpp>
+                             {"#include <gridtools/common/cuda_util.hpp>" if is_gpu else ""}
                              namespace gt = gridtools;
                              {computations}
 
