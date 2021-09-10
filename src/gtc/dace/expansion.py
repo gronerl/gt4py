@@ -417,6 +417,37 @@ class SequentialNaiveVerticalLoopExpander(NaiveVerticalLoopExpander):
 
         recent_state = self.res_state
         self.res_sdfg.add_symbol("k", stype=dace.int32)
+
+        # initially fill k-caches
+        kcaches = [cache for cache in self.node.caches if isinstance(cache, oir.KCache)]
+        kcached_names = {cache.name for cache in kcaches}
+        if kcaches:
+
+            kcache_shapes = {}
+            kcache_write_idcs = {}
+
+            for cache in kcaches:
+                self.res_sdfg.add_array(
+                    name="__kcache_" + cache.name,
+                    shape=kcache_shapes[cache.name],
+                    storage=self.node.kcache_storage_type,
+                    dtype=self.res_sdfg.arrays[cache.name].dtype,
+                )
+            init_fill_caches = [cache for cache in kcaches if needs_init_fill(cache)]
+            if init_fill_caches:
+                kmin = get_axis_bound_str(self.node.sections[0][0].start)
+                for cache in init_fill_caches:
+                    low_offset, high_offset = init_fill_offset_range(cache)
+
+                    main_node = recent_state.add_access(cache.name)
+                    cache_node = recent_state.add_access("__kcache_" + cache.name)
+                    array_dimensions(self.res_sdfg.arrays[cache.name])
+                    subset_str = ",".join(f"0:{s}" for s in kcache_shapes)+','+str(k_subset)
+
+                    ij_subset_str = ""
+
+                    fill_state.add_edge(main_node, None, cache_node, None, dace.Memlet.simple(cache.name, subset_str=main_subset_str, other_subset_str=cache_subset_str))
+
         for interval, section in self.node.sections:
             loop_state = self.res_sdfg.add_state(section.name + "_state")
             _, _, recent_state = self.res_sdfg.add_loop(
