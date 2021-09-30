@@ -45,6 +45,8 @@ from gtc.dace.utils import array_dimensions, replace_strides
 from gtc.passes.gtir_legacy_extents import compute_legacy_extents
 from gtc.passes.gtir_pipeline import GtirPipeline
 from gtc.passes.oir_optimizations.caches import FillFlushToLocalKCaches
+from gtc.passes.oir_optimizations.inlining import MaskInlining
+from gtc.passes.oir_optimizations.mask_stmt_merging import MaskStmtMerging
 from gtc.passes.oir_optimizations.remove_regions import RemoveUnexecutedRegions
 from gtc.passes.oir_pipeline import OirPipeline
 
@@ -217,8 +219,11 @@ class GTCDaCeExtGenerator:
         skip_passes = [
             RemoveUnexecutedRegions,
             FillFlushToLocalKCaches,
+            MaskInlining,
+            MaskStmtMerging,
         ] + oir_pipeline.steps_from_names(pass_names)
-        oir = oir_pipeline.full(skip=skip_passes)
+        # oir = oir_pipeline.full(skip=skip_passes)
+        oir = oir_pipeline.apply([])
         sdfg = OirSDFGBuilder().visit(oir)
 
         to_device(sdfg, self.backend.storage_info["device"])

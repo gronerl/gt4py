@@ -44,20 +44,20 @@ class TaskletCodegen(codegen.TemplatedGenerator):
 
     ScalarAccess = as_fmt("{name}")
 
-    def visit_FieldAccess(self, node: oir.FieldAccess, *, is_target, targets):
+    def visit_FieldAccess(self, node: oir.FieldAccess, *, is_target, targets, **kwargs):
 
-        if (is_target or node.name in targets) and self.visit(node.offset) == "":
+        if (is_target or node.name in targets) and self.visit(node.offset, **kwargs) == "":
             targets.add(node.name)
             name = "__" + node.name
         else:
-            name = node.name + "__" + self.visit(node.offset)
+            name = node.name + "__" + self.visit(node.offset, **kwargs)
         if node.data_index:
             offset_str = str(node.data_index)
         else:
             offset_str = ""
         return name + offset_str
 
-    def visit_CartesianOffset(self, node: common.CartesianOffset):
+    def visit_CartesianOffset(self, node: common.CartesianOffset, **kwargs):
         res = []
         if node.i != 0:
             res.append(f'i{"m" if node.i<0 else "p"}{abs(node.i):d}')
@@ -154,9 +154,9 @@ class TaskletCodegen(codegen.TemplatedGenerator):
 
     LocalScalar = as_fmt("{name}: {dtype}")
 
-    def visit_HorizontalExecution(self, node: oir.HorizontalExecution):
+    def visit_HorizontalExecution(self, node: oir.HorizontalExecution, **kwargs):
         targets: Set[str] = set()
-        return "\n".join([*self.visit(node.declarations), *self.visit(node.body, targets=targets)])
+        return "\n".join([*self.visit(node.declarations, **kwargs), *self.visit(node.body, targets=targets, **kwargs)])
 
     def visit_MaskStmt(self, node: oir.MaskStmt, **kwargs):
         mask_str = ""
@@ -169,17 +169,27 @@ class TaskletCodegen(codegen.TemplatedGenerator):
         return "\n".join([mask_str] + body_code)
 
     def visit_HorizontalMask(self, node: oir.HorizontalMask, **kwargs):
-        imin = get_axis_bound_str(node.i.start, "__I")
-        imax = get_axis_bound_str(node.i.end, "__I")
-        jmin = get_axis_bound_str(node.j.start, "__J")
-        jmax = get_axis_bound_str(node.j.end, "__J")
-        return f"i >= {imin} and i < {imax} and j >= {jmin} and j < {jmax}"
+        checks = []
+        sym_origin = kwargs['sym_origin']
+        if node.i.start is not None:
+            imin = get_axis_bound_str(node.i.start, "__I")
+            checks.append(f"{sym_origin[0]} + i >= {imin}")
+        if node.i.end is not None:
+            imax = get_axis_bound_str(node.i.end, "__I")
+            checks.append(f"{sym_origin[0]} + i < {imax}")
+        if node.j.start is not None:
+            jmin = get_axis_bound_str(node.j.start, "__J")
+            checks.append(f"{sym_origin[1]} + j >= {jmin}")
+        if node.j.end is not None:
+            jmax = get_axis_bound_str(node.j.end, "__J")
+            checks.append(f"{sym_origin[1]} + j < {jmax}")
+        return " and ".join(checks)
 
     @classmethod
     def apply(cls, node: oir.HorizontalExecution, **kwargs: Any) -> str:
         if not isinstance(node, oir.HorizontalExecution):
             raise ValueError("apply() requires oir.HorizontalExecution node")
-        generated_code = super().apply(node)
+        generated_code = super().apply(node, **kwargs)
         formatted_code = codegen.format_source("python", generated_code)
         return formatted_code
 
@@ -277,7 +287,11 @@ class OIRLibraryNodeExpander:
             # res_sdfg already contains symbols for domain and strides where type is always int.
             # The type of API parameters still needs to be set.
             if s not in self.res_sdfg.symbols:
-                self.res_sdfg.add_symbol(s, self.parent_sdfg.symbols[s])
+                if s in self.parent_sdfg.symbols:
+                    self.res_sdfg.add_symbol(s, self.parent_sdfg.symbols[s])
+                else:
+                    self.res_sdfg.add_symbol(s, dace.int32)
+
         return res
 
 
@@ -588,8 +602,8 @@ class NaiveHorizontalExecutionExpander(OIRLibraryNodeExpander):
         from collections import OrderedDict
 
         map_ranges = OrderedDict(
-            j=get_interval_range_str(self.node.iteration_space.j_interval, "__J"),
-            i=get_interval_range_str(self.node.iteration_space.i_interval, "__I"),
+            j=get_interval_range_str(self.node.iteration_space.j_interval, self.node.sym_domain[1]),
+            i=get_interval_range_str(self.node.iteration_space.i_interval, self.node.sym_domain[0]),
         )
         inputs = [name[len("IN_") :] for name in self.node.in_connectors]
         outputs = [name[len("OUT_") :] for name in self.node.out_connectors]
@@ -603,7 +617,7 @@ class NaiveHorizontalExecutionExpander(OIRLibraryNodeExpander):
             outputs=out_memlets,
             input_nodes=input_nodes,
             output_nodes=output_nodes,
-            code=TaskletCodegen.apply(self.node.oir_node),
+            code=TaskletCodegen.apply(self.node.oir_node, sym_origin=self.node.sym_origin),
             external_edges=True,
             schedule=self.node.map_schedule,
         )
@@ -720,12 +734,44 @@ class BlockVerticalLoopExpander(NaiveVerticalLoopExpander):
                 external_memlet=dace.Memlet.simple(name, subset_all),
                 scope_connector=name,
             )
-        nsdfg.symbol_mapping["__I"] = dace.symbolic.pystr_to_symbolic(
-            f"min({tile_sizes[0]}, __I - tile_i )"
-        )
-        nsdfg.symbol_mapping["__J"] = dace.symbolic.pystr_to_symbolic(
-            f"min({tile_sizes[1]}, __J - tile_j )"
-        )
+
+        for node, state in nsdfg.sdfg.all_nodes_recursive():
+            if isinstance(node, HorizontalExecutionLibraryNode):
+                node.sym_domain = [dace.symbolic.pystr_to_symbolic(f"min({tile_sizes[0]},__I-tile_i)"), dace.symbolic.pystr_to_symbolic(f"min({tile_sizes[1]},__J-tile_j)")]
+                node.sym_origin = [dace.symbol("tile_i"), dace.symbol("tile_i")]
+
+
+            elif isinstance(node, dace.nodes.MapEntry):
+                #HE already expanded
+                for i, range in enumerate(node.range.ranges):
+                    lrange = []
+                    for limit in range:
+                        limit = limit.replace(
+                            dace.symbol("__I"),
+                                dace.symbolic.pystr_to_symbolic(f"min({tile_sizes[0]},__I-tile_i)"),
+                        )
+                        limit = limit.replace(
+                            dace.symbol("__J"),
+                                dace.symbolic.pystr_to_symbolic(f"min({tile_sizes[1]},__J-tile_j)"),
+                        )
+                        lrange.append(limit)
+                    node.range[i] = tuple(lrange)
+            else:
+                continue
+
+            parent_sdfg = state.parent
+            while parent_sdfg is not None:
+                if "tile_i" in parent_sdfg.free_symbols:
+                    parent_sdfg.add_symbol('tile_i', dace.int32)
+                    if parent_sdfg.parent_nsdfg_node is not None:
+                        parent_sdfg.parent_nsdfg_node.symbol_mapping['tile_i'] = 'tile_i'
+
+                if "tile_j" in parent_sdfg.free_symbols:
+                    parent_sdfg.add_symbol('tile_j', dace.int32)
+                    if parent_sdfg.parent_nsdfg_node is not None:
+                        parent_sdfg.parent_nsdfg_node.symbol_mapping['tile_j'] = 'tile_j'
+                parent_sdfg = parent_sdfg.parent_sdfg
+
 
 
 class SequentialBlockLoopExpander(BlockVerticalLoopExpander):
