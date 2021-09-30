@@ -633,7 +633,8 @@ class TestNon3DFields(gt_testing.StencilTestSuite):
         "gtc:gt:cpu_ifirst",
         "gtc:gt:cpu_kfirst",
         "gtc:gt:gpu",
-        "gtc:dace",
+        "gtc:dace:cpu",
+        "gtc:dace:gpu",
     ]
     symbols = {
         "field_in": gt_testing.field(

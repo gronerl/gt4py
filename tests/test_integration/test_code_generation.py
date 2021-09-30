@@ -293,7 +293,8 @@ def test_lower_dimensional_inputs_2d_to_3d_forward(backend):
         "gtc:gt:cpu_kfirst",
         pytest.param("gtc:gt:gpu", marks=[pytest.mark.requires_gpu, pytest.mark.xfail]),
         pytest.param("gtc:cuda", marks=[pytest.mark.requires_gpu, pytest.mark.xfail]),
-        "gtc:dace",
+        "gtc:dace:cpu",
+        "gtc:dace:gpu",
     ],
 )
 def test_higher_dimensional_fields(backend):
