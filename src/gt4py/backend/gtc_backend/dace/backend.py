@@ -529,6 +529,8 @@ def sdfg(self) -> dace.SDFG:
         )
         return res
 
+class DaCeCUDAPyModuleGenerator(DaCePyExtModuleGenerator, GTCUDAPyModuleGenerator):
+    pass
 
 class BaseGTCDaceBackend(BaseGTBackend, CLIBackendMixin):
     def generate(self) -> Type["StencilObject"]:
@@ -556,7 +558,6 @@ class BaseGTCDaceBackend(BaseGTBackend, CLIBackendMixin):
             ir=self.builder.definition_ir,
             uses_cuda=self.storage_info["device"] == "gpu",
         )
-
 
 @gt_backend.register
 class GTCDaceBackend(BaseGTCDaceBackend):
@@ -596,5 +597,5 @@ class GTCDaceGPUBackend(BaseGTCDaceBackend):
     }
     options = {**BaseGTBackend.GT_BACKEND_OPTS, "device_sync": {"versioning": True, "type": bool}}
     PYEXT_GENERATOR_CLASS = GTCDaCeExtGenerator  # type: ignore
-    MODULE_GENERATOR_CLASS = GTCUDAPyModuleGenerator
+    MODULE_GENERATOR_CLASS = DaCeCUDAPyModuleGenerator
     USE_LEGACY_TOOLCHAIN = False
