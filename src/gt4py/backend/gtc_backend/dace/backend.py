@@ -55,7 +55,8 @@ class GTCDaCeExtGenerator:
             "oir_pipeline",
             DefaultPipeline(skip=[MaskStmtMerging, MaskInlining, FillFlushToLocalKCaches]),
         )
-        oir = oir_pipeline.run(base_oir)
+        # oir = oir_pipeline.run(base_oir)
+        oir = base_oir
         sdfg = OirSDFGBuilder().visit(oir)
         sdfg.expand_library_nodes(recursive=True)
         sdfg.apply_strict_transformations(validate=True)

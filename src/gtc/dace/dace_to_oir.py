@@ -21,7 +21,7 @@ import dace.data
 import networkx as nx
 
 from gtc import common, oir
-from gtc.dace.nodes import VerticalLoopLibraryNode
+from gtc.dace.nodes import StencilComputation
 from gtc.dace.utils import (
     OIRFieldRenamer,
     array_dimensions,

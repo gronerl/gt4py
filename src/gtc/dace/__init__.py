@@ -15,8 +15,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # need to import expansion so that implementation of expansion is registered
-from .expansion import NaiveHorizontalExecutionExpansion, NaiveVerticalLoopExpansion  # noqa: F401
-from .nodes import VerticalLoopLibraryNode
+from .expansion import StencilComputationExpansion  # noqa: F401
+from .nodes import StencilComputation
 
 
-__all__ = ["VerticalLoopLibraryNode"]
+__all__ = ["StencilComputation"]

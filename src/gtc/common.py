@@ -338,6 +338,9 @@ class CartesianOffset(Node):
     def to_dict(self) -> Dict[str, int]:
         return {"i": self.i, "j": self.j, "k": self.k}
 
+    def to_tuple(self) -> Tuple[int, int, int]:
+        return 0, 0, 0
+
 
 class VariableKOffset(GenericNode, Generic[ExprT]):
     k: ExprT

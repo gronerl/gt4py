@@ -14,7 +14,8 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from typing import Any, Dict, List, Set, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import dace
 import dace.library
@@ -22,21 +23,27 @@ import dace.subsets
 
 import eve
 import gtc.common as common
+import gtc.daceir as dir
 import gtc.oir as oir
-from eve import codegen
+from eve import NodeTranslator, NodeVisitor, codegen
 from eve.codegen import FormatTemplate as as_fmt
 from eve.codegen import MakoTemplate as as_mako
+from gt4py.definitions import Extent
+from gtc import daceir as dir
 from gtc.common import LoopOrder
-from gtc.dace.nodes import HorizontalExecutionLibraryNode, VerticalLoopLibraryNode
+from gtc.dace.nodes import StencilComputation
 from gtc.dace.utils import (
     array_dimensions,
     get_access_collection,
+    get_axis_bound_diff_str,
     get_axis_bound_str,
     get_interval_range_str,
     get_tasklet_symbol,
 )
 from gtc.oir import Interval
 from gtc.passes.oir_optimizations.utils import AccessCollector
+
+from .utils import compute_stencil_field_extents, compute_stencil_field_intervals
 
 
 class TaskletCodegen(codegen.TemplatedGenerator):
@@ -157,9 +164,8 @@ class TaskletCodegen(codegen.TemplatedGenerator):
 
     LocalScalar = as_fmt("{name}: {dtype}")
 
-    def visit_HorizontalExecution(self, node: oir.HorizontalExecution):
-        targets: Set[str] = set()
-        return "\n".join([*self.visit(node.declarations), *self.visit(node.body, targets=targets)])
+    def visit_Tasklet(self, node: dir.Tasklet):
+        return "\n".join(self.visit(node.stmts, targets=set()))
 
     def visit_MaskStmt(self, node: oir.MaskStmt, **kwargs):
         mask_str = ""
@@ -200,437 +206,509 @@ class TaskletCodegen(codegen.TemplatedGenerator):
         return formatted_code
 
 
-class OIRLibraryNodeExpander:
-    def __init__(self, node, parent_state, parent_sdfg):
-        self.res_sdfg = dace.SDFG(node.name + "_sdfg")
-        self.res_state = self.res_sdfg.add_state(node.name + "_state", is_start_state=True)
+class DaCeIRBuilder(NodeTranslator):
+    @dataclass
+    class GlobalContext:
+        library_node: StencilComputation
+        block_extents: Dict[int, Extent]
 
-        self.node = node
-        self.parent_sdfg = parent_sdfg
-        self.parent_state = parent_state
+    @dataclass
+    class SDFGContext:
+        field_extents: Dict[str, dir.FieldExtent]
 
-        self.context_subsets = {
-            edge.dst_conn[len("IN_") :]: edge.data.subset
-            for edge in parent_state.in_edges(node)
-            if edge.dst_conn is not None
-        }
-
-        for edge in self.parent_state.out_edges(self.node):
-            if edge.src_conn is None:
-                continue
-            name = edge.src_conn[len("OUT_") :]
-            if name in self.context_subsets:
-                self.context_subsets[name] = dace.subsets.union(
-                    edge.data.subset, self.context_subsets[name]
-                )
-            else:
-                self.context_subsets[name] = edge.data.subset
-        self.origins = self.get_origins()
-
-    def get_origins(self):
-        raise NotImplementedError("Implement in subclass")
-
-    def add_arrays(self):
-        for name, subset in self.context_subsets.items():
-            dtype = self.parent_sdfg.arrays[name].dtype
-            strides = self.parent_sdfg.arrays[name].strides
-            self.res_sdfg.add_array(
-                name,
-                shape=subset.bounding_box_size(),
-                strides=strides,
-                dtype=dtype,
+        @classmethod
+        def from_gt4py_field_extents_and_intervals(cls, field_extents, field_intervals):
+            return cls(
+                field_extents={
+                    field: dir.FieldExtent.from_gt4py_extent_and_interval(
+                        extent, field_intervals[field]
+                    )
+                    for field, extent in field_extents.items()
+                }
             )
 
-    def fix_context_memlets_and_get_nsdfg(self):
+    @dataclass
+    class IterationContext:
+        grid_subset: dir.GridSubset
 
-        in_connectors = set()
-        out_connectors = set()
-        for conn in self.node.in_connectors:
-            in_connectors.add(conn[len("IN_") :])
-        for conn in self.node.out_connectors:
-            out_connectors.add(conn[len("OUT_") :])
+        def restrict_grid_subset(self, axis: dir.Axis):
+            grid_subset = self.grid_subset.restrict(axis)
+            return DaCeIRBuilder.IterationContext(
+                grid_subset=grid_subset,
+            )
 
-        for edge in self.parent_state.in_edges(self.node):
-            if edge.dst_conn is None:
-                continue
-            name = edge.dst_conn[len("IN_") :]
-            edge.data.subset = self.context_subsets[name]
-            edge.dst_conn = name
-        for edge in self.parent_state.out_edges(self.node):
-            if edge.src_conn is None:
-                continue
-            name = edge.src_conn[len("OUT_") :]
-            edge.data.subset = self.context_subsets[name]
-            edge.src_conn = name
+    def visit_HorizontalExecution(
+        self, node: oir.HorizontalExecution, *, global_ctx, iteration_ctx, **kwargs
+    ):
+        extent = global_ctx.block_extents[id(node)]
+        decls = [self.visit(decl) for decl in node.declarations]
+        stmts = [self.visit(stmt) for stmt in node.body]
 
-        return dace.nodes.NestedSDFG(
-            self.res_sdfg.name + "_nsdfg",
-            self.res_sdfg,
-            inputs=in_connectors,
-            outputs=out_connectors,
+        out_fields = AccessCollector.apply(node).write_fields()
+
+        jmap_grid_subset = iteration_ctx.grid_subset.restrict(
+            dir.Axis.J,
+        )
+        imap_grid_subset = iteration_ctx.grid_subset.restrict(
+            dir.Axis.I,
+        )
+        irange = dir.Range.from_axis_and_extent(dir.Axis.I, extent)
+        i_read_extents = dir.make_read_extents(
+            node, grid_subset=imap_grid_subset, block_extents=global_ctx.block_extents
         )
 
-    def add_nodes_and_edges(self):
-        raise NotImplementedError("Implement in Subclass")
+        imap = dir.DomainMap(
+            index_range=irange,
+            computations=[
+                dir.Tasklet(stmts=decls + stmts, read_extents=i_read_extents, out_fields=out_fields)
+            ],
+            grid_subset=imap_grid_subset,
+            read_extents=i_read_extents,
+            out_fields=out_fields,
+        )
+        j_read_extents = dir.make_read_extents(
+            node, grid_subset=jmap_grid_subset, block_extents=global_ctx.block_extents
+        )
+        jrange = dir.Range.from_axis_and_extent(dir.Axis.J, extent)
+        return dir.DomainMap(
+            index_range=jrange,
+            computations=[imap],
+            grid_subset=jmap_grid_subset,
+            read_extents=j_read_extents,
+            out_fields=out_fields,
+        )
 
-    def expand(self):
-        self.add_arrays()
+    def visit_VerticalLoopSection(
+        self,
+        node: oir.VerticalLoopSection,
+        *,
+        loop_order,
+        iteration_ctx: "DaCeIRBuilder.IterationContext",
+        global_ctx: "DaCeIRBuilder.GlobalContext",
+        **kwargs,
+    ):
+        iteration_ctx = iteration_ctx.restrict_grid_subset(dir.Axis.K)
+        scope_nodes = [
+            self.visit(he, iteration_ctx=iteration_ctx, global_ctx=global_ctx, **kwargs)
+            for he in node.horizontal_executions
+        ]
+        access_collection = AccessCollector.apply(node)
+        grid_subset = iteration_ctx.grid_subset.restrict(dir.Axis.K)
+        if False and loop_order == common.LoopOrder.PARALLEL:
 
-        self.add_nodes_and_edges()
-        res = self.fix_context_memlets_and_get_nsdfg()
-
-        # inherit symbols from parent sdfg
-        res.symbol_mapping = {s: s for s in self.res_sdfg.free_symbols}
-        for s in list(self.res_sdfg.free_symbols):
-            # res_sdfg already contains symbols for domain and strides where type is always int.
-            # The type of API parameters still needs to be set.
-            if s not in self.res_sdfg.symbols:
-                self.res_sdfg.add_symbol(s, self.parent_sdfg.symbols[s])
-        return res
-
-
-class NaiveVerticalLoopExpander(OIRLibraryNodeExpander):
-
-    node: VerticalLoopLibraryNode
-    parent_state: dace.SDFGState
-    parent_sdfg: dace.SDFG
-    res_sdfg: dace.SDFG
-    origins: Dict[str, Tuple[int, int, oir.AxisBound]]
-
-    def get_ij_origins(self):
-
-        origins: Dict[str, Tuple[int, int]] = {}
-
-        for _, section in self.node.sections:
-            for he in (
-                ln
-                for ln, _ in section.all_nodes_recursive()
-                if isinstance(ln, HorizontalExecutionLibraryNode)
-            ):
-                access_collection = get_access_collection(he)
-
-                for name, offsets in access_collection.offsets().items():
-                    off: Tuple[int, int]
-                    for off in offsets:
-                        origin = (
-                            -off[0] - he.iteration_space.i_interval.start.offset,
-                            -off[1] - he.iteration_space.j_interval.start.offset,
-                        )
-                        if name not in origins:
-                            origins[name] = origin
-                        origins[name] = (
-                            max(origins[name][0], origin[0]),
-                            max(origins[name][1], origin[1]),
-                        )
-        return origins
-
-    def get_k_origins(self):
-        k_origs: Dict[str, oir.AxisBound] = {}
-        for interval, section in self.node.sections:
-            access_collection = get_access_collection(section)
-            for name, offsets in access_collection.offsets().items():
-                for off in offsets:
-                    k_level = oir.AxisBound(
-                        level=interval.start.level, offset=interval.start.offset + off[2]
-                    )
-                    k_orig = min(k_origs.get(name, k_level), k_level)
-                    k_origs[name] = k_orig
-        return k_origs
-
-    def get_origins(self):
-        ij_origins = self.get_ij_origins()
-        k_origins = self.get_k_origins()
-        return {name: (*ij_origins[name], k_origins[name]) for name in ij_origins.keys()}
-
-    def get_mapped_subsets_dicts(self, interval: Interval, section: dace.SDFG):
-
-        in_subsets = dict()
-        out_subsets = dict()
-        section_origins: Dict[str, Tuple[int, int]] = dict()
-        min_k_offsets: Dict[str, int] = dict()
-        for he in (
-            ln
-            for ln, _ in section.all_nodes_recursive()
-            if isinstance(ln, (HorizontalExecutionLibraryNode, VerticalLoopLibraryNode))
-        ):
-            access_collection: AccessCollector.CartesianAccessCollection = get_access_collection(he)
-
-            for name, offsets in access_collection.offsets().items():
-                off: Tuple[int, int, int]
-                for off in offsets:
-                    origin = (
-                        -off[0] - he.iteration_space.i_interval.start.offset,
-                        -off[1] - he.iteration_space.j_interval.start.offset,
-                    )
-                    if name not in section_origins:
-                        section_origins[name] = origin
-                    if name not in min_k_offsets:
-                        min_k_offsets[name] = off[2]
-                    section_origins[name] = (
-                        max(section_origins[name][0], origin[0]),
-                        max(section_origins[name][1], origin[1]),
-                    )
-                    min_k_offsets[name] = min(min_k_offsets[name], off[2])
-        access_collection = get_access_collection(section)
-        for name, section_origin in section_origins.items():
-            vl_origin = self.origins[name]
-            shape = section.arrays[name].shape
-            dimensions = array_dimensions(section.arrays[name])
-            subset_strs = []
-            idx = iter(range(3))
-            if dimensions[0]:
-                subset_strs.append(
-                    "{i:+d}:{i:+d}+({I})".format(
-                        i=vl_origin[0] - section_origin[0],
-                        I=shape[next(idx)],
-                    )
-                )
-            if dimensions[1]:
-                subset_strs.append(
-                    "{j:+d}:{j:+d}+({J})".format(
-                        j=vl_origin[1] - section_origin[1], J=shape[next(idx)]
-                    )
-                )
-            if dimensions[2]:
-                subset_strs.append(
-                    "k-({k_orig}){k:+d}:k-({k_orig}){k:+d}{K:+d}".format(
-                        k_orig=get_axis_bound_str(vl_origin[2], "__K"),
-                        k=min_k_offsets[name],
-                        K=shape[next(idx)],
-                    )
-                )
-            data_dims = shape[sum(dimensions) :]
-            subset_strs.extend([f"0:{d}" for d in data_dims])
-            subset_str = ",".join(subset_strs)
-            if name in access_collection.read_fields():
-                in_subsets[name] = subset_str
-            if name in access_collection.write_fields():
-                out_subsets[name] = subset_str
-        return in_subsets, out_subsets
-
-
-@dace.library.register_expansion(VerticalLoopLibraryNode, "naive")
-class NaiveVerticalLoopExpansion(dace.library.ExpandTransformation):
-    environments: List = []
-
-    @staticmethod
-    def expansion(
-        node: "VerticalLoopLibraryNode", parent_state: dace.SDFGState, parent_sdfg: dace.SDFG
-    ) -> dace.nodes.NestedSDFG:
-        from gtc.common import LoopOrder
-
-        if node.loop_order == LoopOrder.PARALLEL:
-            return ParallelNaiveVerticalLoopExpander(node, parent_state, parent_sdfg).expand()
-        else:
-            return SequentialNaiveVerticalLoopExpander(node, parent_state, parent_sdfg).expand()
-
-
-class SequentialNaiveVerticalLoopExpander(NaiveVerticalLoopExpander):
-    @staticmethod
-    def _get_loop_controls(interval: Interval, loop_order: LoopOrder):
-        if loop_order == LoopOrder.BACKWARD:
-            initialize_expr = f"({get_axis_bound_str(interval.end, '__K')})-1"
-            condition_expr = f"k>=({get_axis_bound_str(interval.start, '__K')})"
-            increment_expr = "k-1"
-        else:
-            initialize_expr = f"{get_axis_bound_str(interval.start, '__K')}"
-            condition_expr = f"k<({get_axis_bound_str(interval.end, '__K')})"
-            increment_expr = "k+1"
-        return initialize_expr, condition_expr, increment_expr
-
-    def add_nodes_and_edges(self):
-
-        recent_state = self.res_state
-        for interval, section in self.node.sections:
-            loop_state = self.res_sdfg.add_state(section.name + "_state")
-            _, _, recent_state = self.res_sdfg.add_loop(
-                recent_state,
-                loop_state,
-                None,
-                "k",
-                *SequentialNaiveVerticalLoopExpander._get_loop_controls(
-                    interval, self.node.loop_order
+            read_extents = dir.make_read_extents(
+                node,
+                grid_subset=grid_subset,
+                block_extents=global_ctx.block_extents,
+            )
+            return dir.DomainMap(
+                index_range=dir.Range(
+                    var=dir.Axis.K.iteration_symbol(),
+                    start=dir.AxisBound.from_common(dir.Axis.K, node.interval.start),
+                    end=dir.AxisBound.from_common(dir.Axis.K, node.interval.end),
+                    stride=1,
                 ),
+                computations=scope_nodes,
+                grid_subset=grid_subset,
+                read_extents=read_extents,
+                out_fields=access_collection.write_fields(),
+            )
+        else:
+            stride = 1 if loop_order == common.LoopOrder.FORWARD else -1
+            return dir.DomainLoop(
+                index_range=dir.Range(
+                    var=dir.Axis.K.iteration_symbol(),
+                    start=dir.AxisBound.from_common(dir.Axis.K, node.interval.start),
+                    end=dir.AxisBound.from_common(dir.Axis.K, node.interval.end),
+                    stride=stride,
+                ),
+                loop_states=[
+                    dir.ComputationState(computations=[scope_node], grid_subset=grid_subset)
+                    for scope_node in scope_nodes
+                ],
+                grid_subset=grid_subset,
             )
 
-            in_accesses = dict()
-            out_accesses = dict()
-            in_subsets, out_subsets = self.get_mapped_subsets_dicts(interval, section)
-            for acc in (
-                n for n, _ in section.all_nodes_recursive() if isinstance(n, dace.nodes.AccessNode)
-            ):
-                if acc.access != dace.AccessType.WriteOnly:
-                    if acc.data not in in_accesses:
-                        in_accesses[acc.data] = loop_state.add_read(acc.data)
-                if acc.access != dace.AccessType.ReadOnly:
-                    if acc.data not in out_accesses:
-                        out_accesses[acc.data] = loop_state.add_write(acc.data)
-            nsdfg = loop_state.add_nested_sdfg(
-                sdfg=section,
-                parent=None,
-                inputs={k for k in in_accesses},
-                outputs={k for k in out_accesses},
-            )
-            for name, acc in in_accesses.items():
-                loop_state.add_edge(
-                    acc, None, nsdfg, name, dace.memlet.Memlet.simple(name, in_subsets[name])
-                )
-            for name, acc in out_accesses.items():
-                loop_state.add_edge(
-                    nsdfg, name, acc, None, dace.memlet.Memlet.simple(name, out_subsets[name])
-                )
-
-
-class ParallelNaiveVerticalLoopExpander(NaiveVerticalLoopExpander):
-    def add_nodes_and_edges(self):
-        # for each section
-        # acc -> map over k -> nsdfg with HE's
-        in_accesses = dict()
-        out_accesses = dict()
-
-        for interval, section in self.node.sections:
-
-            interval_str = get_interval_range_str(interval, "__K")
-            map_entry, map_exit = self.res_state.add_map(
-                section.name + "_map", ndrange={"k": interval_str}
-            )
-
-            section_inputs = set()
-            section_outputs = set()
-            for acc in (
-                n for n, _ in section.all_nodes_recursive() if isinstance(n, dace.nodes.AccessNode)
-            ):
-                if acc.access != dace.AccessType.WriteOnly:
-                    if acc.data not in in_accesses:
-                        in_accesses[acc.data] = self.res_state.add_read(acc.data)
-                    section_inputs.add(acc.data)
-                if acc.access != dace.AccessType.ReadOnly:
-                    if acc.data not in out_accesses:
-                        out_accesses[acc.data] = self.res_state.add_write(acc.data)
-                    section_outputs.add(acc.data)
-
-            nsdfg = self.res_state.add_nested_sdfg(
-                sdfg=section,
-                parent=None,
-                inputs=section_inputs,
-                outputs=section_outputs,
-            )
-            in_subsets, out_subsets = self.get_mapped_subsets_dicts(interval, section)
-            if len(in_subsets) == 0:
-                self.res_state.add_edge(map_entry, None, nsdfg, None, memlet=dace.memlet.Memlet())
-            if len(out_subsets) == 0:
-                self.res_state.add_edge(nsdfg, None, map_exit, None, memlet=dace.memlet.Memlet())
-            for name, subset in in_subsets.items():
-                self.res_state.add_memlet_path(
-                    in_accesses[name],
-                    map_entry,
-                    nsdfg,
-                    src_conn=None,
-                    dst_conn=name,
-                    memlet=dace.memlet.Memlet.simple(name, subset),
-                )
-            for name, subset in out_subsets.items():
-                self.res_state.add_memlet_path(
-                    nsdfg,
-                    map_exit,
-                    out_accesses[name],
-                    src_conn=name,
-                    dst_conn=None,
-                    memlet=dace.memlet.Memlet.simple(name, subset, dynamic=False),
-                )
-
-
-class NaiveHorizontalExecutionExpander(OIRLibraryNodeExpander):
-    def get_origins(self):
-        access_collection: AccessCollector.CartesianAccessCollection = get_access_collection(
-            self.node
+    def visit_VerticalLoop(
+        self,
+        node: oir.VerticalLoop,
+        *,
+        global_ctx: "DaCeIRBuilder.GlobalContext",
+        iteration_ctx: "DaCeIRBuilder.IterationContext",
+        **kwargs,
+    ):
+        sdfg_ctx = DaCeIRBuilder.SDFGContext.from_gt4py_field_extents_and_intervals(
+            compute_stencil_field_extents(node, block_extents=global_ctx.block_extents),
+            compute_stencil_field_intervals(node),
         )
 
-        origins = dict()
-        for name, offsets in access_collection.offsets().items():
-            origins[name] = access_collection.offsets()[name].pop()
-            for off in offsets:
-                origins[name] = (
-                    min(origins[name][0], off[0]),
-                    min(origins[name][1], off[1]),
-                    min(origins[name][2], off[2]),
-                )
-            origins[name] = (
-                -origins[name][0] - self.node.iteration_space.i_interval.start.offset,
-                -origins[name][1] - self.node.iteration_space.j_interval.start.offset,
-                -origins[name][2],
+        computations = [
+            self.visit(
+                section,
+                loop_order=node.loop_order,
+                sdfg_ctx=sdfg_ctx,
+                global_ctx=global_ctx,
+                iteration_ctx=iteration_ctx,
+                **kwargs,
             )
-        return origins
-
-    def get_innermost_memlets(self):
-
-        access_collection: AccessCollector.CartesianAccessCollection = get_access_collection(
-            self.node
+            for section in node.sections
+        ]
+        read_extents = dir.make_read_extents(
+            node, grid_subset=iteration_ctx.grid_subset, block_extents=global_ctx.block_extents
         )
+        if False and node.loop_order == common.LoopOrder.PARALLEL:
+            return dir.StateMachine(
+                states=[
+                    dir.ComputationState(
+                        computations=computations, grid_subset=iteration_ctx.grid_subset
+                    )
+                ],
+                field_extents=sdfg_ctx.field_extents,
+                read_extents=read_extents,
+                out_fields=AccessCollector.apply(node).write_fields(),
+            )
+        else:
+            return dir.StateMachine(
+                states=computations,
+                field_extents=sdfg_ctx.field_extents,
+                read_extents=read_extents,
+                out_fields=AccessCollector.apply(node).write_fields(),
+            )
+
+
+class StencilComputationSDFGBuilder(NodeVisitor):
+    @dataclass
+    class NodeContext:
+        input_node_and_conns: Dict[str, Tuple[dace.nodes.Node, Optional[str]]]
+        output_node_and_conns: Dict[str, Tuple[dace.nodes.Node, Optional[str]]]
+
+    @dataclass
+    class SDFGContext:
+        sdfg: dace.SDFG
+        state: dace.SDFGState
+        field_extents: Optional[Dict[str, dir.FieldExtent]] = None
+
+        def add_state(self):
+            sink = self.sdfg.sink_nodes()[0]
+            state = self.sdfg.add_state()
+            self.sdfg.add_edge(sink, state, dace.InterstateEdge())
+
+            return StencilComputationSDFGBuilder.SDFGContext(
+                sdfg=self.sdfg, state=state, field_extents=self.field_extents
+            )
+
+        def add_loop(self, range: dir.Range):
+            sink = self.sdfg.sink_nodes()[0]
+            loop_state = self.sdfg.add_state()
+            self.sdfg.add_loop(
+                before_state=sink,
+                loop_state=loop_state,
+                after_state=self.sdfg.add_state(),
+                loop_var=range.var,
+                initialize_expr=str(range.start),
+                condition_expr=f"{range.var} != {range.end}",
+                increment_expr=f"{range.stride}",
+            )
+            return StencilComputationSDFGBuilder.SDFGContext(
+                sdfg=self.sdfg, state=loop_state, field_extents=self.field_extents
+            )
+
+    @staticmethod
+    def _interval_or_idx_range(node: Union[dir.Interval, dir.IndexWithExtent]) -> Tuple[str, str]:
+        if isinstance(node, dir.Interval):
+            return str(node.start), str(node.end)
+        else:
+            return f"{node.value}{node.extent[0]:+d}", f"{node.value}{node.extent[1]:+d}"
+
+    @staticmethod
+    def _make_subset_str(context_extent: dir.FieldExtent, subset_extent: dir.FieldExtent):
+        res_strs = []
+        for axis in [dir.Axis.I, dir.Axis.J, dir.Axis.K]:
+            context_strs = StencilComputationSDFGBuilder._interval_or_idx_range(
+                context_extent.values[axis]
+            )
+            subset_strs = StencilComputationSDFGBuilder._interval_or_idx_range(
+                subset_extent.values[axis]
+            )
+            res_strs.append(
+                f"({subset_strs[1]})-({context_strs[0]}):({subset_strs[1]})-({context_strs[0]})+1"
+            )
+
+        return ",".join(res_strs)
+
+    @staticmethod
+    def _get_memlets(
+        node: dir.ComputationNode,
+        *,
+        sdfg_ctx: "StencilComputationSDFGBuilder.SDFGContext",
+        node_ctx: "StencilComputationSDFGBuilder.NodeContext",
+    ):
 
         in_memlets = dict()
-        for name, offsets in access_collection.read_offsets().items():
-            dimensions = array_dimensions(self.parent_sdfg.arrays[name])
-            data_dims = self.parent_sdfg.arrays[name].shape[sum(dimensions) :]
-
-            for off in offsets:
-                subset_strs = [
-                    f"{var}{self.origins[name][dim] + off[dim]:+d}"
-                    for dim, var in enumerate("ij0")
-                    if dimensions[dim]
-                ]
-                subset_strs.extend(f"0:{dim}" for dim in data_dims)
-                acc_name = get_tasklet_symbol(name, off, is_target=False)
-                in_memlets[acc_name] = dace.memlet.Memlet.simple(name, ",".join(subset_strs))
+        for field, extent in node.read_extents.items():
+            context_extent = sdfg_ctx.field_extents[field]
+            in_memlets["IN_" + field] = dace.Memlet.simple(
+                field,
+                subset_str=StencilComputationSDFGBuilder._make_subset_str(context_extent, extent),
+            )
 
         out_memlets = dict()
-        for name in access_collection.write_fields():
-            dimensions = array_dimensions(self.parent_sdfg.arrays[name])
-            data_dims = self.parent_sdfg.arrays[name].shape[sum(dimensions) :]
-            subset_strs = [
-                f"{var}{self.origins[name][dim]:+d}"
-                for dim, var in enumerate("ij0")
-                if dimensions[dim]
-            ]
-            subset_strs.extend(f"0:{dim}" for dim in data_dims)
-            acc_name = "__" + name
-            out_memlets[acc_name] = dace.memlet.Memlet.simple(
-                name,
-                ",".join(subset_strs),
-                dynamic=any(isinstance(stmt, oir.MaskStmt) for stmt in self.node.oir_node.body),
+        for field in node.out_fields:
+            extent = node.grid_subset.to_field_extent()
+            context_extent = sdfg_ctx.field_extents[field]
+            out_memlets["OUT_" + field] = dace.Memlet.simple(
+                field,
+                subset_str=StencilComputationSDFGBuilder._make_subset_str(context_extent, extent),
             )
 
         return in_memlets, out_memlets
 
-    def add_nodes_and_edges(self):
-        in_memlets, out_memlets = self.get_innermost_memlets()
-        map_ranges = {
-            "i": get_interval_range_str(self.node.iteration_space.i_interval, "__I"),
-            "j": get_interval_range_str(self.node.iteration_space.j_interval, "__J"),
-        }
-        inputs = [name[len("IN_") :] for name in self.node.in_connectors]
-        outputs = [name[len("OUT_") :] for name in self.node.out_connectors]
-        input_nodes = {name: self.res_state.add_read(name) for name in inputs}
-        output_nodes = {name: self.res_state.add_write(name) for name in outputs}
+    @staticmethod
+    def _add_edges(
+        entry_node: dace.nodes.Node,
+        exit_node: dace.nodes.Node,
+        *,
+        sdfg_ctx: "StencilComputationSDFGBuilder.SDFGContext",
+        node_ctx: "StencilComputationSDFGBuilder.NodeContext",
+        in_memlets: Dict[str, dace.Memlet],
+        out_memlets: Dict[str, dace.Memlet],
+    ):
+        for conn, memlet in in_memlets.items():
+            sdfg_ctx.state.add_edge(
+                *node_ctx.input_node_and_conns[memlet.data], entry_node, conn, memlet
+            )
+        for conn, memlet in out_memlets.items():
+            sdfg_ctx.state.add_edge(
+                exit_node, conn, *node_ctx.output_node_and_conns[memlet.data], memlet
+            )
 
-        self.res_state.add_mapped_tasklet(
-            self.node.name + "_tasklet",
-            map_ranges=map_ranges,
-            inputs=in_memlets,
-            outputs=out_memlets,
-            input_nodes=input_nodes,
-            output_nodes=output_nodes,
-            code=TaskletCodegen.apply(self.node.oir_node),
-            external_edges=True,
+    @staticmethod
+    def _add_origin(
+        sdfg_ctx: "StencilComputationSDFGBuilder.SDFGContext",
+        field: str,
+        subset: Union[dace.subsets.Range, str],
+    ):
+        if isinstance(subset, str):
+            subset = dace.subsets.Range.from_string(subset)
+        origin_strs = []
+        field_extent = sdfg_ctx.field_extents[field]
+        for axis in dir.Axis.I, dir.Axis.J, dir.Axis.K:
+            extent = field_extent[axis]
+            if isinstance(extent, dir.Interval):
+                origin_strs.append(f"-({get_axis_bound_str(extent.start, axis.domain_symbol())})")
+            else:
+                assert isinstance(extent, dir.IndexWithExtent)
+                origin_strs.append(f"-({extent.value})")
+
+        sym = dace.symbolic.pystr_to_symbolic
+        res_ranges = [
+            (sym(f"({rng[0]})+({orig})"), sym(f"({rng[1]})+({orig})"), rng[2])
+            for rng, orig in zip(subset.ranges, origin_strs)
+        ]
+        return dace.subsets.Range(res_ranges)
+
+    def visit_Tasklet(
+        self,
+        node: dir.Tasklet,
+        *,
+        sdfg_ctx: "StencilComputationSDFGBuilder.SDFGContext",
+        node_ctx: "StencilComputationSDFGBuilder.NodeContext",
+    ):
+        code = TaskletCodegen().visit(node)
+        access_collection = AccessCollector.apply(node)
+        in_memlets = dict()
+        for field, offsets in access_collection.read_offsets().items():
+            for offset in offsets:
+                conn_name = get_tasklet_symbol(field, offset, is_target=False)
+                subset_str = "i{:+d},j{:+d},k{:+d}".format(*offset)
+                subset = StencilComputationSDFGBuilder._add_origin(
+                    sdfg_ctx=sdfg_ctx, field=field, subset=subset_str
+                )
+                in_memlets[conn_name] = dace.Memlet.simple(field, subset_str=subset)
+
+        out_memlets = dict()
+        for field in access_collection.write_fields():
+            conn_name = get_tasklet_symbol(field, (0, 0, 0), is_target=True)
+            subset = StencilComputationSDFGBuilder._add_origin(
+                sdfg_ctx=sdfg_ctx, field=field, subset="i,j,k"
+            )
+            out_memlets[conn_name] = dace.Memlet.simple(field, subset_str=subset)
+
+        tasklet = dace.nodes.Tasklet(
+            label=f"Tasklet_{id(node)}",
+            code=code,
+            inputs={inp for inp in in_memlets.keys()},
+            outputs={outp for outp in out_memlets.keys()},
         )
 
+        sdfg_ctx.state.add_node(tasklet)
 
-@dace.library.register_expansion(HorizontalExecutionLibraryNode, "naive")
-class NaiveHorizontalExecutionExpansion(dace.library.ExpandTransformation):
+        StencilComputationSDFGBuilder._add_edges(
+            tasklet,
+            tasklet,
+            sdfg_ctx=sdfg_ctx,
+            in_memlets=in_memlets,
+            out_memlets=out_memlets,
+            node_ctx=node_ctx,
+        )
+
+    def visit_Range(self, node: dir.Range, **kwargs):
+        return node.to_ndrange()
+
+    def visit_DomainMap(
+        self,
+        node: dir.DomainMap,
+        *,
+        node_ctx: "StencilComputationSDFGBuilder.NodeContext",
+        sdfg_ctx: "StencilComputationSDFGBuilder.SDFGContext",
+    ):
+        map_entry, map_exit = sdfg_ctx.state.add_map(
+            name=node.index_range.var + "_map", ndrange=self.visit(node.index_range)
+        )
+
+        input_node_and_conns: Dict[str, Tuple[dace.nodes.Node, str]] = dict()
+        output_node_and_conns: Dict[str, Tuple[dace.nodes.Node, str]] = dict()
+        for scope_node in node.computations:
+            access_collection = AccessCollector.apply(scope_node)
+            for field in access_collection.read_fields():
+                map_entry.add_in_connector("IN_" + field)
+                map_entry.add_out_connector("OUT_" + field)
+                input_node_and_conns[field] = (map_entry, "OUT_" + field)
+            for field in access_collection.write_fields():
+                map_exit.add_in_connector("IN_" + field)
+                map_exit.add_out_connector("OUT_" + field)
+                output_node_and_conns[field] = (map_exit, "IN_" + field)
+
+            inner_node_ctx = StencilComputationSDFGBuilder.NodeContext(
+                input_node_and_conns=input_node_and_conns,
+                output_node_and_conns=output_node_and_conns,
+            )
+
+            self.visit(scope_node, sdfg_ctx=sdfg_ctx, node_ctx=inner_node_ctx)
+
+        in_memlets, out_memlets = self._get_memlets(node, sdfg_ctx=sdfg_ctx, node_ctx=node_ctx)
+
+        self._add_edges(
+            map_entry,
+            map_exit,
+            node_ctx=node_ctx,
+            sdfg_ctx=sdfg_ctx,
+            in_memlets=in_memlets,
+            out_memlets=out_memlets,
+        )
+
+    def visit_DomainLoop(
+        self, node: dir.DomainLoop, *, sdfg_ctx: "StencilComputationSDFGBuilder.SDFGContext"
+    ):
+        sdfg_ctx = sdfg_ctx.add_loop(node.index_range)
+        self.visit(node.loop_states, sdfg_ctx=sdfg_ctx)
+
+    def visit_ComputationState(
+        self,
+        node: dir.ComputationState,
+        *,
+        sdfg_ctx: "StencilComputationSDFGBuilder.SDFGContext",
+    ):
+        sdfg_ctx = sdfg_ctx.add_state()
+
+        for computation in node.computations:
+            read_acc_and_conn = dict()
+            write_acc_and_conn = dict()
+            assert isinstance(computation, dir.ComputationNode)
+            for field in computation.read_extents.keys():
+                if field not in read_acc_and_conn:
+                    read_acc_and_conn[field] = (sdfg_ctx.state.add_access(field), None)
+            for field in computation.out_fields:
+                if field not in write_acc_and_conn:
+                    write_acc_and_conn[field] = (sdfg_ctx.state.add_access(field), None)
+            node_ctx = StencilComputationSDFGBuilder.NodeContext(
+                input_node_and_conns=read_acc_and_conn,
+                output_node_and_conns=write_acc_and_conn,
+            )
+            self.visit(computation, sdfg_ctx=sdfg_ctx, node_ctx=node_ctx)
+
+    def visit_StateMachine(
+        self,
+        node: dir.StateMachine,
+        *,
+        sdfg_ctx: Optional["StencilComputationSDFGBuilder.SDFGContext"] = None,
+        node_ctx: Optional["StencilComputationSDFGBuilder.NodeContext"] = None,
+    ):
+
+        sdfg = dace.SDFG(f"StateMachine_{id(node)}")
+        state = sdfg.add_state()
+
+        nsdfg = dace.nodes.NestedSDFG(
+            label=sdfg.label,
+            sdfg=sdfg,
+            inputs=set(node.read_extents.keys()),
+            outputs=node.out_fields,
+        )
+
+        sdfg_ctx = StencilComputationSDFGBuilder.SDFGContext(
+            sdfg=sdfg,
+            state=state,
+            field_extents=node.field_extents,
+        )
+
+        for computation_state in node.states:
+            self.visit(computation_state, sdfg_ctx=sdfg_ctx)
+
+        if sdfg_ctx is not None and node_ctx is not None:
+            in_memlets, out_memlets = StencilComputationSDFGBuilder._get_memlets(
+                node, sdfg_ctx=sdfg_ctx, node_ctx=node_ctx
+            )
+
+            StencilComputationSDFGBuilder._add_edges(
+                nsdfg,
+                nsdfg,
+                sdfg_ctx=sdfg_ctx,
+                node_ctx=node_ctx,
+                in_memlets=in_memlets,
+                out_memlets=out_memlets,
+            )
+        sdfg.view()
+
+
+@dace.library.register_expansion(StencilComputation, "default")
+class StencilComputationExpansion(dace.library.ExpandTransformation):
     environments: List = []
 
     @staticmethod
     def expansion(
-        node: "HorizontalExecutionLibraryNode", parent_state: dace.SDFGState, parent_sdfg: dace.SDFG
-    ) -> dace.SDFG:
-        return NaiveHorizontalExecutionExpander(node, parent_state, parent_sdfg).expand()
+        node: "StencilComputation", parent_state: dace.SDFGState, parent_sdfg: dace.SDFG
+    ) -> dace.nodes.NestedSDFG:
+
+        start, end = (
+            node.oir_node.sections[0].interval.start,
+            node.oir_node.sections[0].interval.end,
+        )
+        for section in node.oir_node.sections:
+            start = min(start, section.interval.start)
+            end = max(end, section.interval.end)
+
+        overall_interval = dir.Interval(
+            start=dir.AxisBound(axis=dir.Axis.K, level=start.level, offset=start.offset),
+            end=dir.AxisBound(axis=dir.Axis.K, level=end.level, offset=end.offset),
+        )
+        overall_extent = Extent.zeros(ndims=3)
+        for he in node.oir_node.iter_tree().if_isinstance(oir.HorizontalExecution):
+            overall_extent = overall_extent.union(node.extents[id(he)])
+        iteration_ctx = DaCeIRBuilder.IterationContext(
+            grid_subset=dir.GridSubset.from_gt4py_extent_and_interval(
+                overall_extent, overall_interval
+            )
+        )
+        daceir_builder_global_ctx = DaCeIRBuilder.GlobalContext(
+            library_node=node, block_extents=node.extents
+        )
+
+        daceir = DaCeIRBuilder().visit(
+            node.oir_node, global_ctx=daceir_builder_global_ctx, iteration_ctx=iteration_ctx
+        )
+
+        #
+        nsdfg = StencilComputationSDFGBuilder().visit(daceir)
+        # TODO fix context memlets
+        # TODO remove connector prefixes
+        return nsdfg

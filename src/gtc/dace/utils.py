@@ -14,25 +14,44 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import functools
 import re
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Collection, Dict, Iterator, List, Tuple, Union
 
 import dace
 import dace.data
 import networkx as nx
+import numpy as np
 from dace import SDFG, InterstateEdge
 from pydantic import validator
 
 import eve
 import gtc.oir as oir
+from eve import NodeVisitor
 from eve.iterators import TraversalOrder, iter_tree
-from gtc.common import CartesianOffset, DataType, ExprKind, LevelMarker, typestr_to_data_type
+from gt4py.definitions import Extent
+from gtc.common import (
+    CartesianOffset,
+    DataType,
+    ExprKind,
+    LevelMarker,
+    data_type_to_typestr,
+    typestr_to_data_type,
+)
 from gtc.passes.oir_optimizations.utils import AccessCollector
 
 
 if TYPE_CHECKING:
+    import gtc.daceir as dir
     from gtc.dace.nodes import HorizontalExecutionLibraryNode, VerticalLoopLibraryNode
+    from gtc.daceir import DomainSubset
     from gtc.oir import VerticalLoopSection
+
+
+def data_type_to_dace_typeclass(data_type):
+    dtype = np.dtype(data_type_to_typestr(data_type))
+    return dace.dtypes.typeclass(dtype.type)
 
 
 def internal_symbols(sdfg: dace.SDFG):
@@ -114,10 +133,8 @@ def get_interval_range_str(interval, var_name):
 
 def get_axis_bound_diff_str(axis_bound1, axis_bound2, var_name: str):
 
-    if axis_bound1 >= axis_bound2:
-        tmp = axis_bound2
-        axis_bound2 = axis_bound1
-        axis_bound1 = tmp
+    if axis_bound1 <= axis_bound2:
+        axis_bound1, axis_bound2 = axis_bound2, axis_bound1
         sign = "-"
     else:
         sign = ""
@@ -126,7 +143,7 @@ def get_axis_bound_diff_str(axis_bound1, axis_bound2, var_name: str):
         var = var_name
     else:
         var = ""
-    return f"{sign}{var}{axis_bound2.offset-axis_bound1.offset:+d}"
+    return f"{sign}({var}{axis_bound1.offset-axis_bound2.offset:+d})"
 
 
 def get_interval_length_str(interval, var_name):
@@ -662,3 +679,260 @@ def assert_sdfg_equal(sdfg1: dace.SDFG, sdfg2: dace.SDFG):
         assert sdfg1.arrays[name].dtype == sdfg2.arrays[name].dtype
         assert sdfg1.arrays[name].transient == sdfg2.arrays[name].transient
         assert sdfg1.arrays[name].shape == sdfg2.arrays[name].shape
+
+
+# class _HorizontalExecutionExtents(NodeVisitor):
+#     @dataclass
+#     class Context:
+#         # TODO: Remove dependency on gt4py.definitions here
+#         field_extents: Dict[str, Extent] = field(default_factory=dict)
+#         block_extents: Dict[int, Extent] = field(default_factory=dict)
+#
+#     def visit_Stencil(self, node: oir.Stencil) -> Dict[int, Extent]:
+#         ctx = self.Context()
+#         for vloop in reversed(node.vertical_loops):
+#             self.visit(vloop, ctx=ctx)
+#
+#         return ctx.block_extents
+#
+#     def visit_VerticalLoop(self, node: oir.VerticalLoop, **kwargs: Any) -> None:
+#         for section in reversed(node.sections):
+#             self.visit(section, **kwargs)
+#
+#     def visit_HorizontalExecution(self, node: oir.HorizontalExecution, *, ctx: Context) -> None:
+#         results = AccessCollector.apply(node).cartesian_accesses()
+#         horizontal_extent = functools.reduce(
+#             lambda ext, name: ext | ctx.field_extents.get(name, Extent.zeros(ndims=2)),
+#             results.write_fields(),
+#             Extent.zeros(ndims=2),
+#         )
+#         ctx.block_extents[id(node)] = horizontal_extent
+#
+#         for name, accesses in results.read_offsets().items():
+#             extent = functools.reduce(
+#                 lambda ext, off: ext | Extent.from_offset(off[:2]), accesses, Extent.zeros(ndims=2)
+#             )
+#             ctx.field_extents[name] = ctx.field_extents.get(name, Extent.zeros(ndims=2)).union(
+#                 horizontal_extent + extent
+#             )
+#
+#
+# def compute_horizontal_block_extents(node: oir.Stencil) -> Dict[int, Extent]:
+#     return _HorizontalExecutionExtents().visit(node)
+
+from gtc import common
+
+
+def compute_horizontal_block_extents(node: oir.Stencil) -> Dict[int, Extent]:
+    iteration_spaces = oir_iteration_space_computation(node)
+    res = {}
+    for he_id, it in iteration_spaces.items():
+        assert it.i_interval.start.level == common.LevelMarker.START
+        assert it.i_interval.end.level == common.LevelMarker.END
+        assert it.j_interval.start.level == common.LevelMarker.START
+        assert it.j_interval.end.level == common.LevelMarker.END
+        res[he_id] = Extent(
+            (it.i_interval.start.offset, it.i_interval.end.offset),
+            (it.j_interval.start.offset, it.j_interval.end.offset),
+            (0, 0),
+        )
+    return res
+
+
+class OirFieldExtents(NodeVisitor):
+    def __init__(self, read: bool = False, write: bool = False):
+        self.read: bool = read
+        self.write: bool = write
+
+    @dataclass
+    class Context:
+        # TODO: Remove dependency on gt4py.definitions here
+        field_extents: Dict[str, Extent] = field(default_factory=dict)
+
+    def visit_Stencil(self, node: oir.Stencil, *, block_extents) -> Dict[str, Extent]:
+        ctx = self.Context(field_extents=dict())
+        for vloop in reversed(node.vertical_loops):
+            self.visit(vloop, block_extents=block_extents, ctx=ctx)
+
+        return ctx.field_extents
+
+    def visit_VerticalLoop(
+        self, node: oir.VerticalLoop, *, block_extents, ctx=None, **kwargs: Any
+    ) -> Dict[str, Extent]:
+        if ctx is None:
+            ctx = self.Context()
+        for section in reversed(node.sections):
+            self.visit(section, block_extents=block_extents, ctx=ctx, **kwargs)
+        return ctx.field_extents
+
+    def visit_VerticalLoopSection(
+        self, node: oir.VerticalLoopSection, *, block_extents, ctx=None, **kwargs: Any
+    ) -> Dict[str, Extent]:
+        if ctx is None:
+            ctx = self.Context()
+        for horizontal_execution in node.horizontal_executions:
+            self.visit(horizontal_execution, block_extents=block_extents, ctx=ctx, **kwargs)
+        return ctx.field_extents
+
+    def visit_HorizontalExecution(
+        self, node: oir.HorizontalExecution, *, block_extents, ctx: Context = None
+    ) -> Dict[str, Extent]:
+        if ctx is None:
+            ctx = self.Context()
+        access_collection = AccessCollector.apply(node).cartesian_accesses()
+        horizontal_extent = block_extents[id(node)]
+
+        offset_collection = dict()
+        if self.read:
+            offset_collection = access_collection.read_offsets()
+        if self.write:
+            for name in access_collection.write_fields():
+                offset_collection.setdefault(name, set())
+                offset_collection[name].add((0, 0, 0))
+        for name, offsets in offset_collection.items():
+            extent = functools.reduce(
+                lambda ext, off: ext | Extent.from_offset(off), offsets, horizontal_extent
+            )
+            ctx.field_extents[name] = ctx.field_extents.get(name, horizontal_extent).union(
+                horizontal_extent + extent
+            )
+        return ctx.field_extents
+
+
+def compute_stencil_field_extents(oir_node, block_extents=None, read=True, write=True):
+    if block_extents is None:
+        assert isinstance(oir_node, oir.Stencil)
+        block_extents = compute_horizontal_block_extents(oir_node)
+    global_extents = OirFieldExtents(read=read, write=write).visit(
+        oir_node, block_extents=block_extents
+    )
+    return global_extents
+
+
+class OirFieldAccessIntervals(NodeVisitor):
+    def __init__(self, read: bool = False, write: bool = False):
+        self.read: bool = read
+        self.write: bool = write
+
+    @dataclass
+    class Context:
+        # TODO: Remove dependency on gt4py.definitions here
+        field_intervals: Dict[str, oir.Interval] = field(default_factory=dict)
+
+    def visit_Stencil(self, node: oir.Stencil) -> Dict[str, oir.Interval]:
+        ctx = self.Context()
+        for vloop in reversed(node.vertical_loops):
+            self.visit(vloop, ctx=ctx)
+
+        return ctx.field_intervals
+
+    def visit_VerticalLoop(
+        self, node: oir.VerticalLoop, *, ctx=None, **kwargs: Any
+    ) -> Dict[str, oir.Interval]:
+        if ctx is None:
+            ctx = self.Context()
+        for section in node.sections:
+            self.visit(section, ctx=ctx, **kwargs)
+        return ctx.field_intervals
+
+    def visit_VerticalLoopSection(
+        self, node: oir.VerticalLoopSection, *, ctx=None, **kwargs: Any
+    ) -> Dict[str, oir.Interval]:
+        if ctx is None:
+            ctx = self.Context()
+        access_collection = AccessCollector.apply(node).cartesian_accesses()
+        if self.read:
+            for field, offsets in access_collection.read_offsets().items():
+                for offset in offsets:
+                    this_interval = node.interval.shifted(offset[2])
+                    other_interval = ctx.field_intervals.get(field, this_interval)
+                    ctx.field_intervals[field] = oir.Interval.union(other_interval, this_interval)
+        if self.write:
+            for field in access_collection.write_fields():
+                this_interval = node.interval
+                other_interval = ctx.field_intervals.get(field, this_interval)
+                ctx.field_intervals[field] = oir.Interval.union(other_interval, this_interval)
+
+        return ctx.field_intervals
+
+
+def compute_stencil_field_intervals(oir_node, read=True, write=True):
+    global_intervals = OirFieldAccessIntervals(read=read, write=write).visit(oir_node)
+    return global_intervals
+
+
+class DaceStrMaker:
+    def __init__(self, stencil):
+        self.block_extents = compute_horizontal_block_extents(stencil)
+        self.global_extents = OirFieldExtents(read=True, write=True).visit(
+            stencil, block_extents=self.block_extents
+        )
+        self.global_intervals = OirFieldAccessIntervals(read=True, write=True).visit(stencil)
+        self.access_collection = AccessCollector.apply(stencil)
+
+    def make_shape(self, field, sliced_dims={}):
+        global_extent = self.global_extents[field]
+        global_interval = self.global_intervals[field]
+        i_str = "1" if "I" in sliced_dims else "__I"
+        i_str += f"{-global_extent[0][0]+global_extent[0][1]:+d}"
+        j_str = "1" if "J" in sliced_dims else "__J"
+        j_str += f"{-global_extent[1][0]+global_extent[1][1]:+d}"
+        if "K" in sliced_dims:
+            min_k = min(o[2] for o in self.access_collection.read_offsets()[field])
+            if field in self.access_collection.write_fields():
+                min_k = min(0, min_k)
+            max_k = max(o[2] for o in self.access_collection.read_offsets()[field])
+            if field in self.access_collection.write_fields():
+                max_k = max(0, max_k)
+            k_str = f"{max_k-min_k+1}"
+        else:
+            k_str = get_axis_bound_diff_str(global_interval.end, global_interval.start, "__K")
+        return i_str, j_str, k_str
+
+    def make_input_subset_str(self, node, field, sliced_dims={}):
+        local_extent = OirFieldExtents(read=True).visit(node, block_extents=self.block_extents)[
+            field
+        ]
+        local_interval = OirFieldAccessIntervals(read=True).visit(node)[field]
+
+        return self._make_subset_str(local_extent, local_interval, field, sliced_dims=sliced_dims)
+
+    def make_output_subset_str(self, node, field, sliced_dims={}):
+        local_extent = OirFieldExtents(write=True).visit(node, block_extents=self.block_extents)[
+            field
+        ]
+        local_interval = OirFieldAccessIntervals(write=True).visit(node)[field]
+
+        return self._make_subset_str(local_extent, local_interval, field, sliced_dims=sliced_dims)
+
+    def _make_subset_str(self, local_extent, local_interval, field, sliced_dims):
+        global_extent = self.global_extents[field]
+        i_str = (
+            str(-global_extent[0][0] + local_extent[0][0])
+            + f":__I{-global_extent[0][0] + local_extent[0][1]:+d}"
+        )
+        j_str = (
+            str(-global_extent[1][0] + local_extent[1][0])
+            + f":__J{-global_extent[1][0] + local_extent[1][1]:+d}"
+        )
+        k_str = (
+            get_axis_bound_diff_str(local_interval.start, self.global_intervals[field].start, "__K")
+            + ":"
+            + get_axis_bound_diff_str(local_interval.end, self.global_intervals[field].start, "__K")
+        )
+        return f"{i_str}, {j_str}, {k_str}"
+
+
+def get_subset_str(context_subset: "DomainSubset", scope_subset: "DomainSubset"):
+    fmt = "({})-({}):({})-({})"
+    i_str = fmt.format(
+        scope_subset.i.start, context_subset.i.start, scope_subset.i.end, context_subset.i.start
+    )
+    j_str = fmt.format(
+        scope_subset.j.start, context_subset.j.start, scope_subset.j.end, context_subset.j.start
+    )
+    k_str = fmt.format(
+        scope_subset.k.start, context_subset.k.start, scope_subset.k.end, context_subset.k.start
+    )
+
+    return f"{i_str}, {j_str}, {k_str}"

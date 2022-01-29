@@ -158,6 +158,10 @@ class Interval(LocNode):
     def full(cls):
         return cls(start=AxisBound.start(), end=AxisBound.end())
 
+    @classmethod
+    def union(cls, first, second):
+        return cls(start=min(first.start, second.start), end=max(first.end, second.end))
+
 
 class HorizontalExecution(LocNode, SymbolTableTrait):
     body: List[Stmt]
