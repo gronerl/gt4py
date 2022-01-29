@@ -55,11 +55,12 @@ class GTCDaCeExtGenerator:
             "oir_pipeline",
             DefaultPipeline(skip=[MaskStmtMerging, MaskInlining, FillFlushToLocalKCaches]),
         )
-        # oir = oir_pipeline.run(base_oir)
-        oir = base_oir
+        oir = oir_pipeline.run(base_oir)
+        # oir = base_oir
         sdfg = OirSDFGBuilder().visit(oir)
         sdfg.expand_library_nodes(recursive=True)
-        sdfg.apply_strict_transformations(validate=True)
+        sdfg.simplify(validate=True)
+        # sdfg.view()
 
         implementation = DaCeComputationCodegen.apply(gtir, sdfg)
         bindings = DaCeBindingsCodegen.apply(
@@ -240,17 +241,8 @@ class DaCeBindingsCodegen:
         for name, array in sdfg.arrays.items():
             if array.transient:
                 continue
-            domain_dim_flags = tuple(
-                True
-                if any(
-                    dace.symbolic.pystr_to_symbolic(f"__{dim.upper()}") in s.free_symbols
-                    for s in array.shape
-                    if hasattr(s, "free_symbols")
-                )
-                else False
-                for dim in "ijk"
-            )
-            data_ndim = len(array.shape) - sum(array_dimensions(array))
+            domain_dim_flags = array_dimensions(array)
+            data_ndim = len(array.shape) - sum(domain_dim_flags)
             sid_def = pybuffer_to_sid(
                 name=name,
                 ctype=array.dtype.ctype,

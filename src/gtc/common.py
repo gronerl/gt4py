@@ -809,7 +809,7 @@ def data_type_to_typestr(dtype: DataType) -> str:
 
 def typestr_to_data_type(typestr: str) -> DataType:
     if not isinstance(typestr, str) or len(typestr) < 3 or not typestr[2:].isnumeric():
-        return DataType.INVALID  # type: ignore
+        typestr = np.dtype(typestr).str
     table = {
         ("b", 1): DataType.BOOL,
         ("i", 1): DataType.INT8,

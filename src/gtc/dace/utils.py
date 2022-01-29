@@ -96,7 +96,12 @@ def array_dimensions(array: dace.data.Array):
         any(
             re.match(f"__.*_{k}_stride", str(sym))
             for st in array.strides
-            for sym in st.free_symbols
+            for sym in dace.symbolic.pystr_to_symbolic(st).free_symbols
+        )
+        or any(
+            re.match(f"__{k}", str(sym))
+            for sh in array.shape
+            for sym in dace.symbolic.pystr_to_symbolic(sh).free_symbols
         )
         for k in "IJK"
     ]
@@ -791,9 +796,11 @@ class OirFieldExtents(NodeVisitor):
                 offset_collection[name].add((0, 0, 0))
         for name, offsets in offset_collection.items():
             extent = functools.reduce(
-                lambda ext, off: ext | Extent.from_offset(off), offsets, horizontal_extent
+                lambda ext, off: ext | Extent.from_offset(off),
+                offsets,
+                Extent.from_offset(next(iter(offsets))),
             )
-            ctx.field_extents[name] = ctx.field_extents.get(name, horizontal_extent).union(
+            ctx.field_extents[name] = ctx.field_extents.get(name, horizontal_extent + extent).union(
                 horizontal_extent + extent
             )
         return ctx.field_extents

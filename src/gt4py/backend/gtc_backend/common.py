@@ -24,7 +24,7 @@ from eve.codegen import MakoTemplate as as_mako
 def _get_unit_stride_dim(backend, domain_dim_flags, data_ndim):
     make_layout_map = backend.storage_info["layout_map"]
     layout_map = [
-        x for x in make_layout_map(domain_dim_flags + (True,) * data_ndim) if x is not None
+        x for x in make_layout_map(domain_dim_flags + [True] * data_ndim) if x is not None
     ]
     return layout_map.index(max(layout_map))
 
