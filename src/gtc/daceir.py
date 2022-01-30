@@ -6,6 +6,7 @@ from gtc import common, oir
 from gtc.common import LocNode
 from gtc.dace.utils import compute_stencil_field_extents
 from gtc.oir import LocalScalar, Stmt
+from gtc.passes.oir_optimizations.utils import AccessCollector
 
 from .dace.utils import get_axis_bound_diff_str, get_axis_bound_str
 
@@ -147,8 +148,8 @@ class GridSubset(Node):
 
 class FieldExtent(Node):
     values: Dict[Axis, Union[Interval, IndexWithExtent]]
-    dynamic_volume: bool = False
-    dynamic_offset: bool = False
+    dynamic_access: bool = False
+    dynamic_offsets: List[Axis] = []
 
     def __getitem__(self, item):
         if isinstance(item, int):
@@ -156,7 +157,13 @@ class FieldExtent(Node):
         return self.values[item]
 
     @classmethod
-    def from_gt4py_extent_and_interval(cls, extent: gt_def.Extent, interval: oir.Interval):
+    def from_gt4py_extent_and_interval(
+        cls,
+        extent: gt_def.Extent,
+        interval: oir.Interval,
+        dynamic_access: bool = False,
+        dynamic_offsets=[],
+    ):
         i_interval = Interval(
             start=AxisBound(level=common.LevelMarker.START, offset=extent[0][0], axis=Axis.I),
             end=AxisBound(level=common.LevelMarker.END, offset=extent[0][1], axis=Axis.I),
@@ -169,7 +176,11 @@ class FieldExtent(Node):
             start=AxisBound(level=interval.start.level, offset=interval.start.offset, axis=Axis.K),
             end=AxisBound(level=interval.end.level, offset=interval.end.offset, axis=Axis.K),
         )
-        return cls(values={Axis.I: i_interval, Axis.J: j_interval, Axis.K: k_interval})
+        return cls(
+            values={Axis.I: i_interval, Axis.J: j_interval, Axis.K: k_interval},
+            dynamic_access=dynamic_access,
+            dynamic_offsets=dynamic_offsets,
+        )
 
     @property
     def shape(self):
@@ -186,7 +197,7 @@ class FieldExtent(Node):
 
 class ComputationNode(Node):
     read_extents: Dict[str, FieldExtent]
-    out_fields: Set[str]
+    write_extents: Dict[str, FieldExtent]
 
 
 class IterationNode(Node):
@@ -225,6 +236,13 @@ def make_read_extents(node: common.Node, grid_subset: GridSubset, block_extents)
         node, block_extents=block_extents, read=True, write=False
     )
     read_extents = dict()
+    dynamic_fields = {
+        acc.name
+        for mask in node.iter_tree().if_isinstance(oir.MaskStmt)
+        for stmt in mask.body
+        for acc in stmt.left.iter_tree().if_isinstance(oir.FieldAccess)
+        if isinstance(stmt, oir.AssignStmt)
+    }
     for field, extent in in_extents.items():
         res = dict()
 
@@ -241,5 +259,26 @@ def make_read_extents(node: common.Node, grid_subset: GridSubset, block_extents)
                 )
             else:
                 res[axis] = IndexWithExtent(value=grid_int.value, extent=extent[axis_idx])
-        read_extents[field] = FieldExtent(values=res)
+        read_extents[field] = FieldExtent(values=res, dynamic_access=(field in dynamic_fields))
     return read_extents
+
+
+def make_write_extents(node: common.Node, grid_subset: GridSubset, block_extents):
+    write_fields = AccessCollector.apply(node).write_fields()
+    write_extents = dict()
+    dynamic_fields = {
+        acc.name
+        for mask in node.iter_tree().if_isinstance(oir.MaskStmt)
+        for stmt in mask.body
+        for acc in stmt.left.iter_tree().if_isinstance(oir.FieldAccess)
+        if isinstance(stmt, oir.AssignStmt)
+    }
+    for field in write_fields:
+        res = dict()
+        for axis, interval in grid_subset.intervals.items():
+            if isinstance(interval, Index):
+                res[axis] = IndexWithExtent(value=interval.value, extent=(0, 0))
+            else:
+                res[axis] = interval
+        write_extents[field] = FieldExtent(values=res, dynamic_access=(field in dynamic_fields))
+    return write_extents

@@ -58,6 +58,7 @@ class GTCDaCeExtGenerator:
         oir = oir_pipeline.run(base_oir)
         # oir = base_oir
         sdfg = OirSDFGBuilder().visit(oir)
+        # sdfg.view()
         sdfg.expand_library_nodes(recursive=True)
         sdfg.simplify(validate=True)
         # sdfg.view()
