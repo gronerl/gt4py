@@ -56,13 +56,10 @@ class GTCDaCeExtGenerator:
             DefaultPipeline(skip=[MaskStmtMerging, MaskInlining, FillFlushToLocalKCaches]),
         )
         oir = oir_pipeline.run(base_oir)
-        # oir = base_oir
         sdfg = OirSDFGBuilder().visit(oir)
-        # sdfg.view()
         sdfg.expand_library_nodes(recursive=True)
-        sdfg.simplify(validate=True)
-        # sdfg.view()
-
+        # sdfg.simplify(validate=True)
+        sdfg.validate()
         implementation = DaCeComputationCodegen.apply(gtir, sdfg)
         bindings = DaCeBindingsCodegen.apply(
             gtir, sdfg, module_name=self.module_name, backend=self.backend
@@ -106,10 +103,17 @@ class DaCeComputationCodegen:
     @classmethod
     def apply(cls, gtir, sdfg: dace.SDFG):
         self = cls()
+        sdfg.orig_sdfg = None
+        sdfg.transformation_hist = []
+        # TODO: figure out how to remove this (was necessary after adding K-maps)
+        sdfg = sdfg.from_json(sdfg.to_json())
         code_objects = sdfg.generate_code()
         computations = code_objects[[co.title for co in code_objects].index("Frame")].clean_code
         lines = computations.split("\n")
-        computations = "\n".join(lines[0:2] + lines[3:])  # remove import of not generated file
+        for i, line in enumerate(lines):
+            if '#include "../../include/hash.h"' == line.strip():
+                computations = "\n".join(lines[:i] + lines[i + 1 :])
+                break
         computations = codegen.format_source("cpp", computations, style="LLVM")
         interface = cls.template.definition.render(
             name=sdfg.name,
@@ -132,13 +136,14 @@ class DaCeComputationCodegen:
 
     def generate_dace_args(self, gtir, sdfg):
         offset_dict: Dict[str, Tuple[int, int, int]] = {
-            k: (-v[0][0], -v[1][0], -v[2][0]) for k, v in compute_legacy_extents(gtir).items()
+            k: (max(-v[0][0], 0), max(-v[1][0], 0), max(-v[2][0], 0))
+            for k, v in compute_legacy_extents(gtir).items()
         }
         k_origins = {
             field_name: boundary[0] for field_name, boundary in compute_k_boundary(gtir).items()
         }
         for name, origin in k_origins.items():
-            offset_dict[name] = (offset_dict[name][0], offset_dict[name][1], origin)
+            offset_dict[name] = (offset_dict[name][0], offset_dict[name][1], max(origin, 0))
 
         symbols = {f"__{var}": f"__{var}" for var in "IJK"}
         for name, array in sdfg.arrays.items():
@@ -202,7 +207,9 @@ class DaCeComputationCodegen:
             if array.transient:
                 continue
             res.append(f"auto && __{name}_sid")
-        for name, dtype in ((n, d) for n, d in sdfg.symbols.items() if not n.startswith("__")):
+        for name, dtype in sorted(
+            (n, d) for n, d in sdfg.symbols.items() if not n.startswith("__")
+        ):
             res.append(dtype.as_arg(name))
         return res
 
@@ -255,7 +262,7 @@ class DaCeBindingsCodegen:
 
             res.append(sid_def)
         # pass scalar parameters as variables
-        for name in (n for n in sdfg.symbols.keys() if not n.startswith("__")):
+        for name in sorted(n for n in sdfg.symbols.keys() if not n.startswith("__")):
             res.append(name)
         return res
 

@@ -156,7 +156,7 @@ def test_stage_merger_induced_interval_block_reordering(backend):
 
 @pytest.mark.parametrize("backend", ALL_BACKENDS)
 def test_lower_dimensional_inputs(backend):
-    @gtscript.stencil(backend=backend)
+    @gtscript.stencil(backend=backend, debug_mode=True, verbose=True)
     def stencil(
         field_3d: gtscript.Field[gtscript.IJK, np.float_],
         field_2d: gtscript.Field[gtscript.IJ, np.float_],
@@ -475,28 +475,35 @@ def test_read_data_dim_indirect_addressing(backend):
         "gtc:dace",
     ],
 )
-def test_negative_origin(backend):
-    def stencil_i(
-        input_field: gtscript.Field[gtscript.IJK, np.int32],
-        output_field: gtscript.Field[gtscript.IJK, np.int32],
-    ):
-        with computation(PARALLEL), interval(...):
-            output_field = input_field[1, 0, 0]
+class TestNegativeOrigin:
+    def test_horizontal(self, backend):
+        @gtscript.stencil(backend)
+        def stencil_i(
+            input_field: gtscript.Field[gtscript.IJK, np.int32],
+            output_field: gtscript.Field[gtscript.IJK, np.int32],
+        ):
+            with computation(PARALLEL), interval(...):
+                output_field = input_field[1, 0, 0]
 
-    def stencil_k(
-        input_field: gtscript.Field[gtscript.IJK, np.int32],
-        output_field: gtscript.Field[gtscript.IJK, np.int32],
-    ):
-        with computation(PARALLEL), interval(...):
-            output_field = input_field[0, 0, 1]
+        input_field = gt_storage.ones(backend, (0, 0, 0), (1, 1, 1), dtype=np.int32)
+        output_field = gt_storage.zeros(backend, (0, 0, 0), (1, 1, 1), dtype=np.int32)
 
-    input_field = gt_storage.ones(backend, (0, 0, 0), (1, 1, 1), dtype=np.int32)
-    output_field = gt_storage.zeros(backend, (0, 0, 0), (1, 1, 1), dtype=np.int32)
+        stencil_i(input_field, output_field, origin={"input_field": (-1, 0, 0)})
+        assert output_field[0, 0, 0] == 1
 
-    for origin, stencil in {(-1, 0, 0): stencil_i, (0, 0, -1): stencil_k}.items():
-        gtscript.stencil(definition=stencil, backend=backend)(
-            input_field, output_field, origin={"input_field": origin}
-        )
+    def test_vertical(self, backend):
+        @gtscript.stencil(backend)
+        def stencil_k(
+            input_field: gtscript.Field[gtscript.IJK, np.int32],
+            output_field: gtscript.Field[gtscript.IJK, np.int32],
+        ):
+            with computation(PARALLEL), interval(...):
+                output_field = input_field[0, 0, 1]
+
+        input_field = gt_storage.ones(backend, (0, 0, 0), (1, 1, 1), dtype=np.int32)
+        output_field = gt_storage.zeros(backend, (0, 0, 0), (1, 1, 1), dtype=np.int32)
+
+        stencil_k(input_field, output_field, origin={"input_field": (0, 0, -1)})
         assert output_field[0, 0, 0] == 1
 
 

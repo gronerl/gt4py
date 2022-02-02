@@ -51,13 +51,20 @@ class OirSDFGBuilder(eve.NodeVisitor):
         sdfg: dace.SDFG
         last_state: dace.SDFGState
         dace_str_maker: DaceStrMaker
+        declarations: Dict[str, oir.Decl]
 
     def visit_VerticalLoop(
         self, node: oir.VerticalLoop, *, block_extents, ctx: "OirSDFGBuilder.Context", **kwargs
     ):
+        declarations = {
+            acc.name: ctx.declarations[acc.name]
+            for acc in node.iter_tree().if_isinstance(oir.FieldAccess, oir.ScalarAccess)
+            if acc.name in ctx.declarations
+        }
         library_node = StencilComputation(
             name=f"{ctx.sdfg.name}_computation_{id(node)}",
             extents=block_extents,
+            declarations=declarations,
             oir_node=node,
         )
 
@@ -99,15 +106,25 @@ class OirSDFGBuilder(eve.NodeVisitor):
         state = sdfg.add_state(is_start_state=True)
 
         block_extents = compute_horizontal_block_extents(node)
-        ctx = OirSDFGBuilder.Context(sdfg=sdfg, last_state=state, dace_str_maker=DaceStrMaker(node))
+        ctx = OirSDFGBuilder.Context(
+            sdfg=sdfg,
+            last_state=state,
+            dace_str_maker=DaceStrMaker(node),
+            declarations={decl.name: decl for decl in node.params + node.declarations},
+        )
         for param in node.params:
             if isinstance(param, oir.FieldDecl):
+                dim_strs = [d for i, d in enumerate("IJK") if param.dimensions[i]] + [
+                    f"d{d}" for d in range(len(param.data_dims))
+                ]
                 sdfg.add_array(
                     param.name,
-                    shape=ctx.dace_str_maker.make_shape(param.name),
+                    shape=ctx.dace_str_maker.make_shape(
+                        param.name, axes=param.dimensions, data_dims=param.data_dims
+                    ),
                     strides=[
                         dace.symbolic.pystr_to_symbolic(f"__{param.name}_{dim}_stride")
-                        for dim in "IJK"
+                        for dim in dim_strs
                     ],
                     dtype=data_type_to_dace_typeclass(param.dtype),
                     transient=False,
@@ -118,7 +135,9 @@ class OirSDFGBuilder(eve.NodeVisitor):
         for decl in node.declarations:
             sdfg.add_array(
                 decl.name,
-                shape=ctx.dace_str_maker.make_shape(decl.name),
+                shape=ctx.dace_str_maker.make_shape(
+                    decl.name, axes=decl.dimensions, data_dims=decl.data_dims
+                ),
                 dtype=data_type_to_dace_typeclass(decl.dtype),
                 transient=True,
             )

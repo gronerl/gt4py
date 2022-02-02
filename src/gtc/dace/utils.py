@@ -105,7 +105,7 @@ def array_dimensions(array: dace.data.Array):
         )
         for k in "IJK"
     ]
-    return dims
+    return tuple(dims)
 
 
 def get_tasklet_symbol(name, offset, is_target):
@@ -745,9 +745,10 @@ def compute_horizontal_block_extents(node: oir.Stencil) -> Dict[int, Extent]:
 
 
 class OirFieldExtents(NodeVisitor):
-    def __init__(self, read: bool = False, write: bool = False):
+    def __init__(self, read: bool = False, write: bool = False, include_full_domain: bool = False):
         self.read: bool = read
         self.write: bool = write
+        self.include_full_domain = include_full_domain
 
     @dataclass
     class Context:
@@ -800,13 +801,15 @@ class OirFieldExtents(NodeVisitor):
                 offsets,
                 Extent.from_offset(next(iter(offsets))),
             )
-            ctx.field_extents[name] = ctx.field_extents.get(name, horizontal_extent + extent).union(
-                horizontal_extent + extent
-            )
+            ctx.field_extents[name] = ctx.field_extents.get(
+                name, Extent.zeros() if self.include_full_domain else horizontal_extent + extent
+            ).union(horizontal_extent + extent)
         return ctx.field_extents
 
 
-def compute_stencil_field_extents(oir_node, block_extents=None, read=True, write=True):
+def compute_stencil_field_extents(
+    oir_node, block_extents=None, read=True, write=True
+) -> Dict[str, Extent]:
     if block_extents is None:
         assert isinstance(oir_node, oir.Stencil)
         block_extents = compute_horizontal_block_extents(oir_node)
@@ -817,9 +820,10 @@ def compute_stencil_field_extents(oir_node, block_extents=None, read=True, write
 
 
 class OirFieldAccessIntervals(NodeVisitor):
-    def __init__(self, read: bool = False, write: bool = False):
+    def __init__(self, read: bool = False, write: bool = False, include_full_domain: bool = False):
         self.read: bool = read
         self.write: bool = write
+        self.include_full_domain = include_full_domain
 
     @dataclass
     class Context:
@@ -852,12 +856,16 @@ class OirFieldAccessIntervals(NodeVisitor):
             for field, offsets in access_collection.read_offsets().items():
                 for offset in offsets:
                     this_interval = node.interval.shifted(offset[2])
-                    other_interval = ctx.field_intervals.get(field, this_interval)
+                    other_interval = ctx.field_intervals.get(
+                        field, oir.Interval.full() if self.include_full_domain else this_interval
+                    )
                     ctx.field_intervals[field] = oir.Interval.union(other_interval, this_interval)
         if self.write:
             for field in access_collection.write_fields():
                 this_interval = node.interval
-                other_interval = ctx.field_intervals.get(field, this_interval)
+                other_interval = ctx.field_intervals.get(
+                    field, oir.Interval.full() if self.include_full_domain else this_interval
+                )
                 ctx.field_intervals[field] = oir.Interval.union(other_interval, this_interval)
 
         return ctx.field_intervals
@@ -869,77 +877,88 @@ def compute_stencil_field_intervals(oir_node, read=True, write=True):
 
 
 class DaceStrMaker:
-    def __init__(self, stencil):
+    def __init__(self, stencil: oir.Stencil):
         self.block_extents = compute_horizontal_block_extents(stencil)
-        self.global_extents = OirFieldExtents(read=True, write=True).visit(
-            stencil, block_extents=self.block_extents
-        )
-        self.global_intervals = OirFieldAccessIntervals(read=True, write=True).visit(stencil)
+        self.global_extents = OirFieldExtents(
+            read=True, write=True, include_full_domain=True
+        ).visit(stencil, block_extents=self.block_extents)
+        self.global_intervals = OirFieldAccessIntervals(
+            read=True, write=True, include_full_domain=True
+        ).visit(stencil)
         self.access_collection = AccessCollector.apply(stencil)
+        self.decls = {
+            decl.name: decl
+            for decl in stencil.params + stencil.declarations
+            if isinstance(decl, oir.FieldDecl)
+        }
 
-    def make_shape(self, field, sliced_dims={}):
+    def make_shape(self, field, axes, data_dims):
         global_extent = self.global_extents[field]
         global_interval = self.global_intervals[field]
-        i_str = "1" if "I" in sliced_dims else "__I"
-        i_str += f"{-global_extent[0][0]+global_extent[0][1]:+d}"
-        j_str = "1" if "J" in sliced_dims else "__J"
-        j_str += f"{-global_extent[1][0]+global_extent[1][1]:+d}"
-        if "K" in sliced_dims:
-            min_k = min(o[2] for o in self.access_collection.read_offsets()[field])
-            if field in self.access_collection.write_fields():
-                min_k = min(0, min_k)
-            max_k = max(o[2] for o in self.access_collection.read_offsets()[field])
-            if field in self.access_collection.write_fields():
-                max_k = max(0, max_k)
-            k_str = f"{max_k-min_k+1}"
-        else:
-            k_str = get_axis_bound_diff_str(global_interval.end, global_interval.start, "__K")
-        return i_str, j_str, k_str
+        res = []
+        if axes[0]:
+            res.append(f"__I{-global_extent[0][0]+global_extent[0][1]:+d}")
+        if axes[1]:
+            res.append(f"__J{-global_extent[1][0]+global_extent[1][1]:+d}")
+        if axes[2]:
+            res.append(get_axis_bound_diff_str(global_interval.end, global_interval.start, "__K"))
+        for dim in data_dims:
+            res.append(str(dim))
+        return res
 
-    def make_input_subset_str(self, node, field, sliced_dims={}):
+    def make_input_subset_str(self, node, field):
         local_extent = OirFieldExtents(read=True).visit(node, block_extents=self.block_extents)[
             field
         ]
         local_interval = OirFieldAccessIntervals(read=True).visit(node)[field]
 
-        return self._make_subset_str(local_extent, local_interval, field, sliced_dims=sliced_dims)
+        return self._make_subset_str(local_extent, local_interval, field)
 
-    def make_output_subset_str(self, node, field, sliced_dims={}):
+    def make_output_subset_str(self, node, field):
         local_extent = OirFieldExtents(write=True).visit(node, block_extents=self.block_extents)[
             field
         ]
         local_interval = OirFieldAccessIntervals(write=True).visit(node)[field]
 
-        return self._make_subset_str(local_extent, local_interval, field, sliced_dims=sliced_dims)
+        return self._make_subset_str(local_extent, local_interval, field)
 
-    def _make_subset_str(self, local_extent, local_interval, field, sliced_dims):
+    def _make_subset_str(self, local_extent, local_interval, field):
         global_extent = self.global_extents[field]
-        i_str = (
-            str(-global_extent[0][0] + local_extent[0][0])
-            + f":__I{-global_extent[0][0] + local_extent[0][1]:+d}"
-        )
-        j_str = (
-            str(-global_extent[1][0] + local_extent[1][0])
-            + f":__J{-global_extent[1][0] + local_extent[1][1]:+d}"
-        )
-        k_str = (
-            get_axis_bound_diff_str(local_interval.start, self.global_intervals[field].start, "__K")
-            + ":"
-            + get_axis_bound_diff_str(local_interval.end, self.global_intervals[field].start, "__K")
-        )
-        return f"{i_str}, {j_str}, {k_str}"
+        res = []
+        if self.decls[field].dimensions[0]:
+            res.append(
+                str(-global_extent[0][0] + local_extent[0][0])
+                + f":__I{-global_extent[0][0] + local_extent[0][1]:+d}"
+            )
+        if self.decls[field].dimensions[1]:
+            res.append(
+                str(-global_extent[1][0] + local_extent[1][0])
+                + f":__J{-global_extent[1][0] + local_extent[1][1]:+d}"
+            )
+        if self.decls[field].dimensions[2]:
+            res.append(
+                get_axis_bound_diff_str(
+                    local_interval.start, self.global_intervals[field].start, "__K"
+                )
+                + ":"
+                + get_axis_bound_diff_str(
+                    local_interval.end, self.global_intervals[field].start, "__K"
+                )
+            )
+        res.extend(f"0:{d}" for d in self.decls[field].data_dims)
+        return ",".join(res)
 
 
-def get_subset_str(context_subset: "DomainSubset", scope_subset: "DomainSubset"):
-    fmt = "({})-({}):({})-({})"
-    i_str = fmt.format(
-        scope_subset.i.start, context_subset.i.start, scope_subset.i.end, context_subset.i.start
-    )
-    j_str = fmt.format(
-        scope_subset.j.start, context_subset.j.start, scope_subset.j.end, context_subset.j.start
-    )
-    k_str = fmt.format(
-        scope_subset.k.start, context_subset.k.start, scope_subset.k.end, context_subset.k.start
-    )
-
-    return f"{i_str}, {j_str}, {k_str}"
+# def get_subset_str(context_subset: "DomainSubset", scope_subset: "DomainSubset"):
+#     fmt = "({})-({}):({})-({})"
+#     i_str = fmt.format(
+#         scope_subset.i.start, context_subset.i.start, scope_subset.i.end, context_subset.i.start
+#     )
+#     j_str = fmt.format(
+#         scope_subset.j.start, context_subset.j.start, scope_subset.j.end, context_subset.j.start
+#     )
+#     k_str = fmt.format(
+#         scope_subset.k.start, context_subset.k.start, scope_subset.k.end, context_subset.k.start
+#     )
+#
+#     return f"{i_str}, {j_str}, {k_str}"
