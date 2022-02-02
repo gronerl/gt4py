@@ -956,14 +956,34 @@ class StencilComputationSDFGBuilder(NodeVisitor):
         for axis in [dcir.Axis.I, dcir.Axis.J, dcir.Axis.K]:
             sdfg.add_symbol(axis.domain_symbol(), stype=dace.int32)
             symbol_mapping[axis.domain_symbol()] = axis.domain_symbol()
+        if sdfg_ctx is not None and node_ctx is not None:
+            nsdfg = sdfg_ctx.state.add_nested_sdfg(
+                sdfg=sdfg,
+                parent=None,
+                inputs=set(node.read_extents.keys()),
+                outputs=set(node.write_extents.keys()),
+                symbol_mapping=symbol_mapping,
+            )
+            in_memlets, out_memlets = StencilComputationSDFGBuilder._get_memlets(
+                node, with_prefix=False, sdfg_ctx=sdfg_ctx, node_ctx=node_ctx
+            )
 
-        nsdfg = dace.nodes.NestedSDFG(
-            label=sdfg.label,
-            sdfg=sdfg,
-            inputs=set(node.read_extents.keys()),
-            outputs=set(node.write_extents.keys()),
-            symbol_mapping=symbol_mapping,
-        )
+            StencilComputationSDFGBuilder._add_edges(
+                nsdfg,
+                nsdfg,
+                sdfg_ctx=sdfg_ctx,
+                node_ctx=node_ctx,
+                in_memlets=in_memlets,
+                out_memlets=out_memlets,
+            )
+        else:
+            nsdfg = dace.nodes.NestedSDFG(
+                label=sdfg.label,
+                sdfg=sdfg,
+                inputs=set(node.read_extents.keys()),
+                outputs=set(node.write_extents.keys()),
+                symbol_mapping=symbol_mapping,
+            )
 
         inner_sdfg_ctx = StencilComputationSDFGBuilder.SDFGContext(
             sdfg=sdfg,
@@ -994,23 +1014,6 @@ class StencilComputationSDFGBuilder(NodeVisitor):
                 nsdfg.sdfg.add_symbol(sym, stype=dace.int32)
             nsdfg.symbol_mapping.setdefault(str(sym), str(sym))
 
-        if sdfg_ctx is not None and node_ctx is not None:
-            sdfg_ctx.state.add_node(nsdfg)
-            nsdfg.sdfg.parent_sdfg = sdfg_ctx.sdfg
-            nsdfg.sdfg.parent = sdfg_ctx.state
-            nsdfg.sdfg.parent_nsdfg_node = nsdfg
-            in_memlets, out_memlets = StencilComputationSDFGBuilder._get_memlets(
-                node, with_prefix=False, sdfg_ctx=sdfg_ctx, node_ctx=node_ctx
-            )
-
-            StencilComputationSDFGBuilder._add_edges(
-                nsdfg,
-                nsdfg,
-                sdfg_ctx=sdfg_ctx,
-                node_ctx=node_ctx,
-                in_memlets=in_memlets,
-                out_memlets=out_memlets,
-            )
         return nsdfg
 
 

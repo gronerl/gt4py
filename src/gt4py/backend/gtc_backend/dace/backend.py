@@ -59,6 +59,7 @@ class GTCDaCeExtGenerator:
         sdfg = OirSDFGBuilder().visit(oir)
         sdfg.expand_library_nodes(recursive=True)
         sdfg.simplify(validate=True)
+
         implementation = DaCeComputationCodegen.apply(gtir, sdfg)
         bindings = DaCeBindingsCodegen.apply(
             gtir, sdfg, module_name=self.module_name, backend=self.backend
@@ -104,8 +105,6 @@ class DaCeComputationCodegen:
         self = cls()
         sdfg.orig_sdfg = None
         sdfg.transformation_hist = []
-        # TODO: figure out how to remove this (was necessary after adding K-maps)
-        sdfg = sdfg.from_json(sdfg.to_json())
         code_objects = sdfg.generate_code()
         computations = code_objects[[co.title for co in code_objects].index("Frame")].clean_code
         lines = computations.split("\n")
