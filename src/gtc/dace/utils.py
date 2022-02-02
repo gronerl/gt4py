@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, Collection, Dict, Iterator, List, Tuple, 
 
 import dace
 import dace.data
-import networkx as nx
 import numpy as np
 from dace import SDFG, InterstateEdge
 from pydantic import validator
@@ -31,21 +30,13 @@ import gtc.oir as oir
 from eve import NodeVisitor
 from eve.iterators import TraversalOrder, iter_tree
 from gt4py.definitions import Extent
-from gtc.common import (
-    CartesianOffset,
-    DataType,
-    ExprKind,
-    LevelMarker,
-    data_type_to_typestr,
-    typestr_to_data_type,
-)
+from gtc import common
+from gtc.common import CartesianOffset, ExprKind, LevelMarker, data_type_to_typestr
 from gtc.passes.oir_optimizations.utils import AccessCollector
 
 
 if TYPE_CHECKING:
-    import gtc.daceir as dir
     from gtc.dace.nodes import HorizontalExecutionLibraryNode, VerticalLoopLibraryNode
-    from gtc.daceir import DomainSubset
     from gtc.oir import VerticalLoopSection
 
 
@@ -65,24 +56,6 @@ def internal_symbols(sdfg: dace.SDFG):
             )
             res.extend([f"__{name}_d{dim}_stride" for dim in range(n_data_dims)])
     return res
-
-
-def validate_oir_sdfg(sdfg: dace.SDFG):
-
-    from gtc.dace.nodes import VerticalLoopLibraryNode
-
-    sdfg.validate()
-    is_correct_node_types = all(
-        isinstance(n, (dace.SDFGState, dace.nodes.AccessNode, VerticalLoopLibraryNode))
-        for n, _ in sdfg.all_nodes_recursive()
-    )
-    is_correct_data_and_dtype = all(
-        isinstance(array, dace.data.Array)
-        and typestr_to_data_type(dace_dtype_to_typestr(array.dtype)) != DataType.INVALID
-        for array in sdfg.arrays.values()
-    )
-    if not is_correct_node_types or not is_correct_data_and_dtype:
-        raise ValueError("Not a valid OIR-level SDFG")
 
 
 def dace_dtype_to_typestr(dtype: Any):
@@ -626,108 +599,6 @@ class IntervalMapping:
         return res
 
 
-def assert_sdfg_equal(sdfg1: dace.SDFG, sdfg2: dace.SDFG):
-    from gtc.dace.nodes import (
-        HorizontalExecutionLibraryNode,
-        OIRLibraryNode,
-        VerticalLoopLibraryNode,
-    )
-
-    def edge_match(edge1, edge2):
-        edge1 = next(iter(edge1.values()))
-        edge2 = next(iter(edge2.values()))
-        try:
-            if edge1["src_conn"] is not None:
-                assert edge2["src_conn"] is not None
-                assert edge1["src_conn"] == edge2["src_conn"]
-            else:
-                assert edge2["src_conn"] is None
-            assert edge1["data"] == edge2["data"]
-            assert edge1["data"].data == edge2["data"].data
-        except AssertionError:
-            return False
-        return True
-
-    def node_match(n1, n2):
-        n1 = n1["node"]
-        n2 = n2["node"]
-        try:
-            if not isinstance(
-                n1, (dace.nodes.AccessNode, VerticalLoopLibraryNode, HorizontalExecutionLibraryNode)
-            ):
-                raise TypeError
-            if isinstance(n1, dace.nodes.AccessNode):
-                assert isinstance(n2, dace.nodes.AccessNode)
-                assert n1.access == n2.access
-                assert n1.data == n2.data
-            elif isinstance(n1, OIRLibraryNode):
-                assert n1 == n2
-        except AssertionError:
-            return False
-        return True
-
-    assert len(sdfg1.states()) == 1
-    assert len(sdfg2.states()) == 1
-    state1 = sdfg1.states()[0]
-    state2 = sdfg2.states()[0]
-
-    # SDFGState.nx does not contain any node info in the networkx node attrs (but does for edges),
-    # so we add it here manually.
-    nx.set_node_attributes(state1.nx, {n: n for n in state1.nx.nodes}, "node")
-    nx.set_node_attributes(state2.nx, {n: n for n in state2.nx.nodes}, "node")
-
-    assert nx.is_isomorphic(state1.nx, state2.nx, edge_match=edge_match, node_match=node_match)
-
-    for name in sdfg1.arrays.keys():
-        assert isinstance(sdfg1.arrays[name], type(sdfg2.arrays[name]))
-        assert isinstance(sdfg2.arrays[name], type(sdfg1.arrays[name]))
-        assert sdfg1.arrays[name].dtype == sdfg2.arrays[name].dtype
-        assert sdfg1.arrays[name].transient == sdfg2.arrays[name].transient
-        assert sdfg1.arrays[name].shape == sdfg2.arrays[name].shape
-
-
-# class _HorizontalExecutionExtents(NodeVisitor):
-#     @dataclass
-#     class Context:
-#         # TODO: Remove dependency on gt4py.definitions here
-#         field_extents: Dict[str, Extent] = field(default_factory=dict)
-#         block_extents: Dict[int, Extent] = field(default_factory=dict)
-#
-#     def visit_Stencil(self, node: oir.Stencil) -> Dict[int, Extent]:
-#         ctx = self.Context()
-#         for vloop in reversed(node.vertical_loops):
-#             self.visit(vloop, ctx=ctx)
-#
-#         return ctx.block_extents
-#
-#     def visit_VerticalLoop(self, node: oir.VerticalLoop, **kwargs: Any) -> None:
-#         for section in reversed(node.sections):
-#             self.visit(section, **kwargs)
-#
-#     def visit_HorizontalExecution(self, node: oir.HorizontalExecution, *, ctx: Context) -> None:
-#         results = AccessCollector.apply(node).cartesian_accesses()
-#         horizontal_extent = functools.reduce(
-#             lambda ext, name: ext | ctx.field_extents.get(name, Extent.zeros(ndims=2)),
-#             results.write_fields(),
-#             Extent.zeros(ndims=2),
-#         )
-#         ctx.block_extents[id(node)] = horizontal_extent
-#
-#         for name, accesses in results.read_offsets().items():
-#             extent = functools.reduce(
-#                 lambda ext, off: ext | Extent.from_offset(off[:2]), accesses, Extent.zeros(ndims=2)
-#             )
-#             ctx.field_extents[name] = ctx.field_extents.get(name, Extent.zeros(ndims=2)).union(
-#                 horizontal_extent + extent
-#             )
-#
-#
-# def compute_horizontal_block_extents(node: oir.Stencil) -> Dict[int, Extent]:
-#     return _HorizontalExecutionExtents().visit(node)
-
-from gtc import common
-
-
 def compute_horizontal_block_extents(node: oir.Stencil) -> Dict[int, Extent]:
     iteration_spaces = oir_iteration_space_computation(node)
     res = {}
@@ -853,20 +724,20 @@ class OirFieldAccessIntervals(NodeVisitor):
             ctx = self.Context()
         access_collection = AccessCollector.apply(node).cartesian_accesses()
         if self.read:
-            for field, offsets in access_collection.read_offsets().items():
+            for name, offsets in access_collection.read_offsets().items():
                 for offset in offsets:
                     this_interval = node.interval.shifted(offset[2])
                     other_interval = ctx.field_intervals.get(
-                        field, oir.Interval.full() if self.include_full_domain else this_interval
+                        name, oir.Interval.full() if self.include_full_domain else this_interval
                     )
-                    ctx.field_intervals[field] = oir.Interval.union(other_interval, this_interval)
+                    ctx.field_intervals[name] = oir.Interval.union(other_interval, this_interval)
         if self.write:
-            for field in access_collection.write_fields():
+            for name in access_collection.write_fields():
                 this_interval = node.interval
                 other_interval = ctx.field_intervals.get(
-                    field, oir.Interval.full() if self.include_full_domain else this_interval
+                    name, oir.Interval.full() if self.include_full_domain else this_interval
                 )
-                ctx.field_intervals[field] = oir.Interval.union(other_interval, this_interval)
+                ctx.field_intervals[name] = oir.Interval.union(other_interval, this_interval)
 
         return ctx.field_intervals
 
@@ -947,18 +818,3 @@ class DaceStrMaker:
             )
         res.extend(f"0:{d}" for d in self.decls[field].data_dims)
         return ",".join(res)
-
-
-# def get_subset_str(context_subset: "DomainSubset", scope_subset: "DomainSubset"):
-#     fmt = "({})-({}):({})-({})"
-#     i_str = fmt.format(
-#         scope_subset.i.start, context_subset.i.start, scope_subset.i.end, context_subset.i.start
-#     )
-#     j_str = fmt.format(
-#         scope_subset.j.start, context_subset.j.start, scope_subset.j.end, context_subset.j.start
-#     )
-#     k_str = fmt.format(
-#         scope_subset.k.start, context_subset.k.start, scope_subset.k.end, context_subset.k.start
-#     )
-#
-#     return f"{i_str}, {j_str}, {k_str}"

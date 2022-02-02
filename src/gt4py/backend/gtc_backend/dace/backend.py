@@ -58,8 +58,7 @@ class GTCDaCeExtGenerator:
         oir = oir_pipeline.run(base_oir)
         sdfg = OirSDFGBuilder().visit(oir)
         sdfg.expand_library_nodes(recursive=True)
-        # sdfg.simplify(validate=True)
-        sdfg.validate()
+        sdfg.simplify(validate=True)
         implementation = DaCeComputationCodegen.apply(gtir, sdfg)
         bindings = DaCeBindingsCodegen.apply(
             gtir, sdfg, module_name=self.module_name, backend=self.backend
@@ -244,7 +243,6 @@ class DaCeBindingsCodegen:
 
     def generate_sid_params(self, sdfg: dace.SDFG):
         res = []
-        import dace.data
 
         for name, array in sdfg.arrays.items():
             if array.transient:

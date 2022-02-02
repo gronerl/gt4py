@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from typing import Dict, List
+from typing import Dict
 
 import dace.data
 import dace.dtypes
@@ -33,7 +33,7 @@ class StencilComputation(library.LibraryNode):
 
     oir_node = dace.properties.DataclassProperty(dtype=VerticalLoop, default=None, allow_none=True)
     declarations = dace.properties.DictProperty(
-        key_type=str, value_type=Decl, default={}, allow_none=False
+        key_type=str, value_type=Decl, default=None, allow_none=True
     )
     extents = dace.properties.DictProperty(
         key_type=int, value_type=Extent, default=None, allow_none=True
@@ -46,7 +46,7 @@ class StencilComputation(library.LibraryNode):
         name="unnamed_vloop",
         oir_node: VerticalLoop = None,
         extents: Dict[int, Extent] = None,
-        declarations: Dict[str, Decl] = [],
+        declarations: Dict[str, Decl] = None,
         *args,
         **kwargs,
     ):

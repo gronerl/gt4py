@@ -1,10 +1,7 @@
-from typing import Any, Dict, List, Set, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
-from pydantic import root_validator, validator
-
-from eve import Int, IntEnum, Node, Str, StrEnum
+from eve import Int, Node, Str, StrEnum
 from gt4py import definitions as gt_def
-from gt4py.utils import is_iterable_of
 from gtc import common, oir
 from gtc.common import LocNode
 from gtc.dace.utils import compute_stencil_field_extents
@@ -15,7 +12,7 @@ from .dace.utils import get_axis_bound_diff_str, get_axis_bound_str
 
 
 class Axis(StrEnum):
-    I = "I"
+    I = "I"  # noqa: E741 ambiguous variable name 'I'
     J = "J"
     K = "K"
 
@@ -188,7 +185,7 @@ def axes_list_from_flags(flags):
 
 def make_extent_dict(
     extent: gt_def.Extent, interval: oir.Interval, axes: List[Axis]
-) -> Dict[Axis, Interval]:
+) -> Dict[Axis, Union[Index, Interval]]:
     i_interval = Interval(
         start=AxisBound(level=common.LevelMarker.START, offset=extent[0][0], axis=Axis.I),
         end=AxisBound(level=common.LevelMarker.END, offset=extent[0][1], axis=Axis.I),
@@ -197,6 +194,7 @@ def make_extent_dict(
         start=AxisBound(level=common.LevelMarker.START, offset=extent[1][0], axis=Axis.J),
         end=AxisBound(level=common.LevelMarker.END, offset=extent[1][1], axis=Axis.J),
     )
+    k_interval: Union[Index, Interval]
     if isinstance(interval, Index):
         k_interval = interval
     else:
