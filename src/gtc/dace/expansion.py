@@ -517,6 +517,148 @@ class DaCeIRBuilder(NodeTranslator):
             write_accesses=j_write_accesses,
         )
 
+    def _make_parallel_loop_section(
+        self,
+        node: oir.VerticalLoopSection,
+        *,
+        iteration_ctx: "DaCeIRBuilder.IterationContext",
+        global_ctx: "DaCeIRBuilder.GlobalContext",
+        sdfg_ctx: "DaCeIRBuilder.SDFGContext",
+        **kwargs,
+    ):
+
+        section_iteration_ctx = iteration_ctx.restricted_to_interval(dcir.Axis.K, node.interval)
+        inner_iteration_ctx = section_iteration_ctx.restricted_grid_subset(dcir.Axis.K)
+        statemachine_sdfg_ctx = inner_iteration_ctx.make_nested_sdfg_context(
+            node, global_ctx=global_ctx, sdfg_ctx=sdfg_ctx
+        )
+        scope_nodes = [
+            self.visit(
+                he,
+                iteration_ctx=inner_iteration_ctx,
+                global_ctx=global_ctx,
+                sdfg_ctx=statemachine_sdfg_ctx,
+                **kwargs,
+            )
+            for he in node.horizontal_executions
+        ]
+
+        inner_read_accesses = make_read_accesses(
+            node,
+            iteration_ctx=inner_iteration_ctx,
+            sdfg_ctx=sdfg_ctx,
+            global_ctx=global_ctx,
+        )
+        inner_write_accesses = make_write_accesses(
+            node,
+            iteration_ctx=inner_iteration_ctx,
+            sdfg_ctx=sdfg_ctx,
+            global_ctx=global_ctx,
+        )
+        read_accesses = make_read_accesses(
+            node,
+            iteration_ctx=section_iteration_ctx,
+            sdfg_ctx=sdfg_ctx,
+            global_ctx=global_ctx,
+        )
+        write_accesses = make_write_accesses(
+            node,
+            iteration_ctx=section_iteration_ctx,
+            sdfg_ctx=sdfg_ctx,
+            global_ctx=global_ctx,
+        )
+
+        declared_symbols = set(
+            n.name for n in node.iter_tree().if_isinstance(oir.ScalarDecl, oir.LocalScalar)
+        )
+        symbols = dict()
+        for name in statemachine_sdfg_ctx.field_decls.keys():
+            for s in global_ctx.arrays[name].strides:
+                for sym in dace.symbolic.symlist(s).values():
+                    symbols[str(sym)] = common.DataType.INT32
+
+        for acc in node.iter_tree().if_isinstance(oir.ScalarAccess):
+            if acc.name not in declared_symbols:
+                declared_symbols.add(acc.name)
+                symbols[acc.name] = acc.dtype
+        for axis in dcir.Axis.dims_3d():
+            if axis.domain_symbol() not in declared_symbols:
+                declared_symbols.add(axis.domain_symbol())
+                symbols[axis.domain_symbol()] = common.DataType.INT32
+
+        states = [
+            dcir.ComputationState(
+                computations=[computation], grid_subset=inner_iteration_ctx.grid_subset
+            )
+            for computation in scope_nodes
+        ]
+        computation = dcir.StateMachine(
+            field_decls=statemachine_sdfg_ctx.field_decls,
+            symbols=symbols,
+            states=states,
+            read_accesses=inner_read_accesses,
+            write_accesses=inner_write_accesses,
+        )
+
+        return dcir.DomainMap(
+            index_range=dcir.Range(
+                var=dcir.Axis.K.iteration_symbol(),
+                start=dcir.AxisBound.from_common(dcir.Axis.K, node.interval.start),
+                end=dcir.AxisBound.from_common(dcir.Axis.K, node.interval.end),
+                stride=1,
+            ),
+            computations=[computation],
+            grid_subset=inner_iteration_ctx.grid_subset,
+            read_accesses=read_accesses,
+            write_accesses=write_accesses,
+        )
+
+    def _make_sequential_loop_section(
+        self,
+        node: oir.VerticalLoopSection,
+        *,
+        loop_order,
+        iteration_ctx: "DaCeIRBuilder.IterationContext",
+        global_ctx: "DaCeIRBuilder.GlobalContext",
+        sdfg_ctx: "DaCeIRBuilder.SDFGContext",
+        **kwargs,
+    ):
+        section_iteration_ctx = iteration_ctx.restricted_to_interval(dcir.Axis.K, node.interval)
+        inner_iteration_ctx = section_iteration_ctx.restricted_grid_subset(dcir.Axis.K)
+
+        scope_nodes = [
+            self.visit(
+                he,
+                iteration_ctx=inner_iteration_ctx,
+                global_ctx=global_ctx,
+                sdfg_ctx=sdfg_ctx,
+                **kwargs,
+            )
+            for he in node.horizontal_executions
+        ]
+        stride = -1 if loop_order == common.LoopOrder.BACKWARD else 1
+        start, end = (
+            dcir.AxisBound.from_common(dcir.Axis.K, node.interval.start),
+            dcir.AxisBound.from_common(dcir.Axis.K, node.interval.end),
+        )
+        if loop_order == common.LoopOrder.BACKWARD:
+            start, end = f"({end}{stride:+1})", f"({start}{stride:+1})"
+        return dcir.DomainLoop(
+            index_range=dcir.Range(
+                var=dcir.Axis.K.iteration_symbol(),
+                stride=stride,
+                start=start,
+                end=end,
+            ),
+            loop_states=[
+                dcir.ComputationState(
+                    computations=[scope_node], grid_subset=inner_iteration_ctx.grid_subset
+                )
+                for scope_node in scope_nodes
+            ],
+            grid_subset=inner_iteration_ctx.grid_subset,
+        )
+
     def visit_VerticalLoopSection(
         self,
         node: oir.VerticalLoopSection,
@@ -528,124 +670,17 @@ class DaCeIRBuilder(NodeTranslator):
         **kwargs,
     ):
 
-        section_iteration_ctx = iteration_ctx.restricted_to_interval(dcir.Axis.K, node.interval)
-        inner_iteration_ctx = section_iteration_ctx.restricted_grid_subset(dcir.Axis.K)
         if loop_order == common.LoopOrder.PARALLEL:
-            statemachine_sdfg_ctx = inner_iteration_ctx.make_nested_sdfg_context(
-                node, global_ctx=global_ctx, sdfg_ctx=sdfg_ctx
-            )
-            scope_nodes = [
-                self.visit(
-                    he,
-                    iteration_ctx=inner_iteration_ctx,
-                    global_ctx=global_ctx,
-                    sdfg_ctx=statemachine_sdfg_ctx,
-                    **kwargs,
-                )
-                for he in node.horizontal_executions
-            ]
-
-            inner_read_accesses = make_read_accesses(
-                node,
-                iteration_ctx=inner_iteration_ctx,
-                sdfg_ctx=sdfg_ctx,
-                global_ctx=global_ctx,
-            )
-            inner_write_accesses = make_write_accesses(
-                node,
-                iteration_ctx=inner_iteration_ctx,
-                sdfg_ctx=sdfg_ctx,
-                global_ctx=global_ctx,
-            )
-            read_accesses = make_read_accesses(
-                node,
-                iteration_ctx=section_iteration_ctx,
-                sdfg_ctx=sdfg_ctx,
-                global_ctx=global_ctx,
-            )
-            write_accesses = make_write_accesses(
-                node,
-                iteration_ctx=section_iteration_ctx,
-                sdfg_ctx=sdfg_ctx,
-                global_ctx=global_ctx,
-            )
-
-            declared_symbols = set(
-                n.name for n in node.iter_tree().if_isinstance(oir.ScalarDecl, oir.LocalScalar)
-            )
-            symbols = dict()
-            for name in statemachine_sdfg_ctx.field_decls.keys():
-                for s in global_ctx.arrays[name].strides:
-                    for sym in dace.symbolic.symlist(s).values():
-                        symbols[str(sym)] = common.DataType.INT32
-
-            for acc in node.iter_tree().if_isinstance(oir.ScalarAccess):
-                if acc.name not in declared_symbols:
-                    declared_symbols.add(acc.name)
-                    symbols[acc.name] = acc.dtype
-            for axis in dcir.Axis.dims_3d():
-                if axis.domain_symbol() not in declared_symbols:
-                    declared_symbols.add(axis.domain_symbol())
-                    symbols[axis.domain_symbol()] = common.DataType.INT32
-
-            states = [
-                dcir.ComputationState(
-                    computations=[computation], grid_subset=inner_iteration_ctx.grid_subset
-                )
-                for computation in scope_nodes
-            ]
-            computation = dcir.StateMachine(
-                field_decls=statemachine_sdfg_ctx.field_decls,
-                symbols=symbols,
-                states=states,
-                read_accesses=inner_read_accesses,
-                write_accesses=inner_write_accesses,
-            )
-
-            return dcir.DomainMap(
-                index_range=dcir.Range(
-                    var=dcir.Axis.K.iteration_symbol(),
-                    start=dcir.AxisBound.from_common(dcir.Axis.K, node.interval.start),
-                    end=dcir.AxisBound.from_common(dcir.Axis.K, node.interval.end),
-                    stride=1,
-                ),
-                computations=[computation],
-                grid_subset=inner_iteration_ctx.grid_subset,
-                read_accesses=read_accesses,
-                write_accesses=write_accesses,
+            return self._make_parallel_loop_section(
+                node, iteration_ctx=iteration_ctx, global_ctx=global_ctx, sdfg_ctx=sdfg_ctx
             )
         else:
-            scope_nodes = [
-                self.visit(
-                    he,
-                    iteration_ctx=inner_iteration_ctx,
-                    global_ctx=global_ctx,
-                    sdfg_ctx=sdfg_ctx,
-                    **kwargs,
-                )
-                for he in node.horizontal_executions
-            ]
-            stride = -1 if loop_order == common.LoopOrder.BACKWARD else 1
-            start, end = (
-                dcir.AxisBound.from_common(dcir.Axis.K, node.interval.start),
-                dcir.AxisBound.from_common(dcir.Axis.K, node.interval.end),
-            )
-            if loop_order == common.LoopOrder.BACKWARD:
-                start, end = f"({end}{stride:+1})", f"({start}{stride:+1})"
-            return dcir.DomainLoop(
-                index_range=dcir.Range(
-                    var=dcir.Axis.K.iteration_symbol(),
-                    stride=stride,
-                    start=start,
-                    end=end,
-                ),
-                loop_states=[
-                    dcir.ComputationState(
-                        computations=[scope_node], grid_subset=inner_iteration_ctx.grid_subset
-                    )
-                    for scope_node in scope_nodes
-                ],
-                grid_subset=inner_iteration_ctx.grid_subset,
+            return self._make_sequential_loop_section(
+                node,
+                loop_order=loop_order,
+                iteration_ctx=iteration_ctx,
+                global_ctx=global_ctx,
+                sdfg_ctx=sdfg_ctx,
             )
 
     def visit_VerticalLoop(
