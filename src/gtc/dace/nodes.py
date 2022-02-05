@@ -23,7 +23,7 @@ import dace.subsets
 from dace import library
 
 from gt4py.definitions import Extent
-from gtc.oir import Decl, VerticalLoop
+from gtc.oir import Decl, FieldDecl, VerticalLoop
 
 
 @library.node
@@ -65,3 +65,9 @@ class StencilComputation(library.LibraryNode):
                     oir_node.loc.column,
                     oir_node.loc.source,
                 )
+
+    @property
+    def field_decls(self) -> Dict[str, FieldDecl]:
+        return {
+            name: decl for name, decl in self.declarations.items() if isinstance(decl, FieldDecl)
+        }

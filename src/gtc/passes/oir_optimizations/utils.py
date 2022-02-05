@@ -70,6 +70,7 @@ class AccessCollector(NodeVisitor):
         is_write: bool,
         **kwargs: Any,
     ) -> None:
+        self.visit(node.offset, accesses=accesses, is_write=False, **kwargs)
         offsets = node.offset.to_dict()
         accesses.append(
             GeneralAccess(

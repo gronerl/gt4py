@@ -104,9 +104,7 @@ class OirSDFGBuilder(eve.NodeVisitor):
                 ]
                 sdfg.add_array(
                     param.name,
-                    shape=ctx.dace_str_maker.make_shape(
-                        param.name, axes=param.dimensions, data_dims=param.data_dims
-                    ),
+                    shape=ctx.dace_str_maker.make_shape(param.name),
                     strides=[
                         dace.symbolic.pystr_to_symbolic(f"__{param.name}_{dim}_stride")
                         for dim in dim_strs
@@ -120,9 +118,7 @@ class OirSDFGBuilder(eve.NodeVisitor):
         for decl in node.declarations:
             sdfg.add_array(
                 decl.name,
-                shape=ctx.dace_str_maker.make_shape(
-                    decl.name, axes=decl.dimensions, data_dims=decl.data_dims
-                ),
+                shape=ctx.dace_str_maker.make_shape(decl.name),
                 dtype=data_type_to_dace_typeclass(decl.dtype),
                 transient=True,
             )

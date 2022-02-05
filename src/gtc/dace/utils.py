@@ -14,7 +14,6 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-import functools
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Collection, Dict, Iterator, List, Tuple, Union
@@ -33,6 +32,16 @@ from gt4py.definitions import Extent
 from gtc import common
 from gtc.common import CartesianOffset, ExprKind, LevelMarker, data_type_to_typestr
 from gtc.passes.oir_optimizations.utils import AccessCollector
+
+
+if TYPE_CHECKING:
+    from gtc import daceir as dcir
+
+
+def axes_list_from_flags(flags):
+    from gtc import daceir as dcir
+
+    return [ax for f, ax in zip(flags, dcir.Axis.dims_3d()) if f]
 
 
 if TYPE_CHECKING:
@@ -87,7 +96,9 @@ def get_tasklet_symbol(name, offset, is_target):
 
     acc_name = name + "__"
     suffix = "_".join(
-        var + ("m" if o < 0 else "p") + f"{abs(o):d}" for var, o in zip("ijk", offset) if o != 0
+        var + ("m" if o < 0 else "p") + f"{abs(o):d}"
+        for var, o in zip("ijk", offset)
+        if o is not None and o != 0
     )
     if suffix != "":
         acc_name += suffix
@@ -615,206 +626,254 @@ def compute_horizontal_block_extents(node: oir.Stencil) -> Dict[int, Extent]:
     return res
 
 
-class OirFieldExtents(NodeVisitor):
-    def __init__(self, read: bool = False, write: bool = False, include_full_domain: bool = False):
-        self.read: bool = read
-        self.write: bool = write
-        self.include_full_domain = include_full_domain
+class AccessInfoCollector(NodeVisitor):
+    def __init__(self, collect_read: bool, collect_write: bool, include_full_domain: bool = False):
+        self.collect_read: bool = collect_read
+        self.collect_write: bool = collect_write
+        self.include_full_domain: bool = include_full_domain
 
     @dataclass
     class Context:
-        # TODO: Remove dependency on gt4py.definitions here
-        field_extents: Dict[str, Extent] = field(default_factory=dict)
-
-    def visit_Stencil(self, node: oir.Stencil, *, block_extents) -> Dict[str, Extent]:
-        ctx = self.Context(field_extents=dict())
-        for vloop in reversed(node.vertical_loops):
-            self.visit(vloop, block_extents=block_extents, ctx=ctx)
-
-        return ctx.field_extents
+        axes: Dict[str, List["dcir.Axis"]]
+        access_infos: Dict[str, "dcir.FieldAccessInfo"] = field(default_factory=dict)
 
     def visit_VerticalLoop(
         self, node: oir.VerticalLoop, *, block_extents, ctx=None, **kwargs: Any
-    ) -> Dict[str, Extent]:
+    ) -> Dict[str, "dcir.FieldAccessInfo"]:
         if ctx is None:
             ctx = self.Context()
         for section in reversed(node.sections):
             self.visit(section, block_extents=block_extents, ctx=ctx, **kwargs)
-        return ctx.field_extents
+        return ctx.access_infos
 
     def visit_VerticalLoopSection(
-        self, node: oir.VerticalLoopSection, *, block_extents, ctx=None, **kwargs: Any
-    ) -> Dict[str, Extent]:
+        self,
+        node: oir.VerticalLoopSection,
+        *,
+        block_extents,
+        ctx=None,
+        grid_subset=None,
+        **kwargs: Any,
+    ) -> Dict[str, "dcir.FieldAccessInfo"]:
+        from gtc import daceir as dcir
+
         if ctx is None:
             ctx = self.Context()
-        for horizontal_execution in node.horizontal_executions:
-            self.visit(horizontal_execution, block_extents=block_extents, ctx=ctx, **kwargs)
-        return ctx.field_extents
+
+        inner_ctx = self.Context(
+            axes=ctx.axes,
+        )
+        self.visit(node.horizontal_executions, block_extents=block_extents, ctx=inner_ctx, **kwargs)
+        inner_infos = inner_ctx.access_infos
+
+        if grid_subset is None or dcir.Axis.K not in grid_subset.intervals:
+            k_grid = dcir.GridSubset.from_interval(node.interval, dcir.Axis.K)
+        else:
+            k_grid = dcir.GridSubset.from_interval(grid_subset.intervals[dcir.Axis.K], dcir.Axis.K)
+        inner_infos = {name: info.apply_iteration(k_grid) for name, info in inner_infos.items()}
+
+        ctx.access_infos.update(
+            {
+                name: info.union(ctx.access_infos.get(name, info))
+                for name, info in inner_infos.items()
+            }
+        )
+
+        return ctx.access_infos
 
     def visit_HorizontalExecution(
-        self, node: oir.HorizontalExecution, *, block_extents, ctx: Context = None
-    ) -> Dict[str, Extent]:
-        if ctx is None:
-            ctx = self.Context()
-        access_collection = AccessCollector.apply(node).cartesian_accesses()
+        self,
+        node: oir.HorizontalExecution,
+        *,
+        block_extents,
+        ctx: Context,
+        grid_subset=None,
+        **kwargs,
+    ) -> Dict[str, "dcir.FieldAccessInfo"]:
+        from gtc import daceir as dcir
+
         horizontal_extent = block_extents[id(node)]
 
-        offset_collection = dict()
-        if self.read:
-            offset_collection = access_collection.read_offsets()
-        if self.write:
-            for name in access_collection.write_fields():
-                offset_collection.setdefault(name, set())
-                offset_collection[name].add((0, 0, 0))
-        for name, offsets in offset_collection.items():
-            extent = functools.reduce(
-                lambda ext, off: ext | Extent.from_offset(off),
-                offsets,
-                Extent.from_offset(next(iter(offsets))),
-            )
-            ctx.field_extents[name] = ctx.field_extents.get(
-                name, Extent.zeros() if self.include_full_domain else horizontal_extent + extent
-            ).union(horizontal_extent + extent)
-        return ctx.field_extents
+        inner_ctx = self.Context(
+            axes=ctx.axes,
+        )
+        self.visit(node.body, horizontal_extent=horizontal_extent, ctx=inner_ctx, **kwargs)
+        inner_infos = inner_ctx.access_infos
+        ij_grid = dcir.GridSubset.from_gt4py_extent(horizontal_extent)
+        if grid_subset is not None:
+            for axis in ij_grid.axes():
+                if axis in grid_subset.intervals:
+                    ij_grid = ij_grid.set_interval(axis, grid_subset.intervals[axis])
+        inner_infos = {name: info.apply_iteration(ij_grid) for name, info in inner_infos.items()}
+
+        ctx.access_infos.update(
+            {
+                name: info.union(ctx.access_infos.get(name, info))
+                for name, info in inner_infos.items()
+            }
+        )
+
+        return ctx.access_infos
+
+    def visit_AssignStmt(self, node: oir.AssignStmt, **kwargs):
+        self.visit(node.right, is_write=False, **kwargs)
+        self.visit(node.left, is_write=True, **kwargs)
+
+    def visit_MaskStmt(self, node: oir.MaskStmt, *, is_conditional=False, **kwargs):
+        self.generic_visit(node.mask, is_conditional=is_conditional, **kwargs)
+        self.generic_visit(node.body, is_conditional=True, **kwargs)
+
+    def _make_access_info(
+        self, offset_node: Union[CartesianOffset, oir.VariableKOffset], axes, is_conditional
+    ):
+        from gtc import daceir as dcir
+
+        offset = list(offset_node.to_tuple())
+        if isinstance(offset_node, oir.VariableKOffset):
+            variable_offset_axes = [dcir.Axis.K]
+        else:
+            variable_offset_axes = []
+
+        intervals = dict()
+        for axis in axes:
+            if axis in variable_offset_axes:
+                intervals[axis] = dcir.IndexWithExtent(
+                    value=axis.iteration_symbol(), extent=[0, 0], variable=True
+                )
+            else:
+                intervals[axis] = dcir.IndexWithExtent(
+                    value=axis.iteration_symbol(),
+                    extent=[offset[axis.to_idx()], offset[axis.to_idx()]],
+                )
+        grid_subset = dcir.GridSubset(intervals=intervals)
+        return dcir.FieldAccessInfo(
+            grid_subset=grid_subset,
+            dynamic_access=len(variable_offset_axes) > 0 or is_conditional,
+            variable_offset_axes=variable_offset_axes,
+        )
+
+    def visit_FieldAccess(
+        self,
+        node: oir.FieldAccess,
+        *,
+        is_write: bool,
+        ctx: "AccessInfoCollector.Context",
+        is_conditional=False,
+        **kwargs,
+    ):
+        self.visit(node.offset, is_conditional=is_conditional, ctx=ctx, is_write=False, **kwargs)
+
+        if (not self.collect_read and (not is_write)) or (not self.collect_write and is_write):
+            return
+
+        access_info = self._make_access_info(
+            node.offset, axes=ctx.axes[node.name], is_conditional=is_conditional
+        )
+        ctx.access_infos[node.name] = access_info.union(
+            ctx.access_infos.get(node.name, access_info)
+        )
 
 
-def compute_stencil_field_extents(
-    oir_node, block_extents=None, read=True, write=True
-) -> Dict[str, Extent]:
+def compute_dcir_access_infos(
+    oir_node,
+    *,
+    oir_decls=None,
+    block_extents=None,
+    collect_read=True,
+    collect_write=True,
+    include_full_domain=False,
+    **kwargs,
+) -> Dict[str, "dcir.FieldAccessInfo"]:
+    from gtc import daceir as dcir
+
     if block_extents is None:
         assert isinstance(oir_node, oir.Stencil)
         block_extents = compute_horizontal_block_extents(oir_node)
-    global_extents = OirFieldExtents(read=read, write=write).visit(
-        oir_node, block_extents=block_extents
+
+    axes = {
+        name: axes_list_from_flags(decl.dimensions)
+        for name, decl in oir_decls.items()
+        if isinstance(decl, oir.FieldDecl)
+    }
+    ctx = AccessInfoCollector.Context(axes=axes, access_infos=dict())
+    AccessInfoCollector(collect_read=collect_read, collect_write=collect_write).visit(
+        oir_node, block_extents=block_extents, ctx=ctx, **kwargs
     )
-    return global_extents
-
-
-class OirFieldAccessIntervals(NodeVisitor):
-    def __init__(self, read: bool = False, write: bool = False, include_full_domain: bool = False):
-        self.read: bool = read
-        self.write: bool = write
-        self.include_full_domain = include_full_domain
-
-    @dataclass
-    class Context:
-        # TODO: Remove dependency on gt4py.definitions here
-        field_intervals: Dict[str, oir.Interval] = field(default_factory=dict)
-
-    def visit_Stencil(self, node: oir.Stencil) -> Dict[str, oir.Interval]:
-        ctx = self.Context()
-        for vloop in reversed(node.vertical_loops):
-            self.visit(vloop, ctx=ctx)
-
-        return ctx.field_intervals
-
-    def visit_VerticalLoop(
-        self, node: oir.VerticalLoop, *, ctx=None, **kwargs: Any
-    ) -> Dict[str, oir.Interval]:
-        if ctx is None:
-            ctx = self.Context()
-        for section in node.sections:
-            self.visit(section, ctx=ctx, **kwargs)
-        return ctx.field_intervals
-
-    def visit_VerticalLoopSection(
-        self, node: oir.VerticalLoopSection, *, ctx=None, **kwargs: Any
-    ) -> Dict[str, oir.Interval]:
-        if ctx is None:
-            ctx = self.Context()
-        access_collection = AccessCollector.apply(node).cartesian_accesses()
-        if self.read:
-            for name, offsets in access_collection.read_offsets().items():
-                for offset in offsets:
-                    this_interval = node.interval.shifted(offset[2])
-                    other_interval = ctx.field_intervals.get(
-                        name, oir.Interval.full() if self.include_full_domain else this_interval
-                    )
-                    ctx.field_intervals[name] = oir.Interval.union(other_interval, this_interval)
-        if self.write:
-            for name in access_collection.write_fields():
-                this_interval = node.interval
-                other_interval = ctx.field_intervals.get(
-                    name, oir.Interval.full() if self.include_full_domain else this_interval
+    if include_full_domain:
+        res = dict()
+        for name, access_info in ctx.access_infos.items():
+            res[name] = access_info.union(
+                dcir.FieldAccessInfo(
+                    grid_subset=dcir.GridSubset.full_domain(axes=access_info.axes())
                 )
-                ctx.field_intervals[name] = oir.Interval.union(other_interval, this_interval)
+            )
+    else:
+        res = ctx.access_infos
 
-        return ctx.field_intervals
+    return res
 
 
-def compute_stencil_field_intervals(oir_node, read=True, write=True):
-    global_intervals = OirFieldAccessIntervals(read=read, write=write).visit(oir_node)
-    return global_intervals
+def make_subset_str(
+    context_info: "dcir.FieldAccessInfo", access_info: "dcir.FieldAccessInfo", data_dims
+):
+    res_strs = []
+    for axis in access_info.axes():
+        context_strs = context_info.grid_subset.intervals[axis].idx_range
+        subset_strs = access_info.grid_subset.intervals[axis].idx_range
+        res_strs.append(
+            f"({subset_strs[0]})-({context_strs[0]}):({subset_strs[1]})-({context_strs[0]})"
+        )
+    res_strs.extend(f"0:{dim}" for dim in data_dims)
+    return ",".join(res_strs)
 
 
 class DaceStrMaker:
     def __init__(self, stencil: oir.Stencil):
-        self.block_extents = compute_horizontal_block_extents(stencil)
-        self.global_extents = OirFieldExtents(
-            read=True, write=True, include_full_domain=True
-        ).visit(stencil, block_extents=self.block_extents)
-        self.global_intervals = OirFieldAccessIntervals(
-            read=True, write=True, include_full_domain=True
-        ).visit(stencil)
-        self.access_collection = AccessCollector.apply(stencil)
         self.decls = {
             decl.name: decl
             for decl in stencil.params + stencil.declarations
             if isinstance(decl, oir.FieldDecl)
         }
+        self.block_extents = compute_horizontal_block_extents(stencil)
+        self.access_infos = compute_dcir_access_infos(
+            stencil,
+            oir_decls=self.decls,
+            block_extents=self.block_extents,
+            collect_read=True,
+            collect_write=True,
+            include_full_domain=True,
+        )
+        self.access_collection = AccessCollector.apply(stencil)
 
-    def make_shape(self, field, axes, data_dims):
-        global_extent = self.global_extents[field]
-        global_interval = self.global_intervals[field]
-        res = []
-        if axes[0]:
-            res.append(f"__I{-global_extent[0][0]+global_extent[0][1]:+d}")
-        if axes[1]:
-            res.append(f"__J{-global_extent[1][0]+global_extent[1][1]:+d}")
-        if axes[2]:
-            res.append(get_axis_bound_diff_str(global_interval.end, global_interval.start, "__K"))
-        for dim in data_dims:
-            res.append(str(dim))
-        return res
+    def make_shape(self, field):
+        return self.access_infos[field].shape + self.decls[field].data_dims
 
     def make_input_subset_str(self, node, field):
-        local_extent = OirFieldExtents(read=True).visit(node, block_extents=self.block_extents)[
-            field
-        ]
-        local_interval = OirFieldAccessIntervals(read=True).visit(node)[field]
+        local_access_info = compute_dcir_access_infos(
+            node,
+            collect_read=True,
+            collect_write=False,
+            block_extents=self.block_extents,
+            oir_decls=self.decls,
+        )[field]
+        for axis in local_access_info.variable_offset_axes:
+            local_access_info = local_access_info.clamp_full_axis(axis)
 
-        return self._make_subset_str(local_extent, local_interval, field)
+        return self._make_subset_str(local_access_info, field)
 
     def make_output_subset_str(self, node, field):
-        local_extent = OirFieldExtents(write=True).visit(node, block_extents=self.block_extents)[
-            field
-        ]
-        local_interval = OirFieldAccessIntervals(write=True).visit(node)[field]
+        local_access_info = compute_dcir_access_infos(
+            node,
+            collect_read=False,
+            collect_write=True,
+            block_extents=self.block_extents,
+            oir_decls=self.decls,
+        )[field]
+        for axis in local_access_info.variable_offset_axes:
+            local_access_info = local_access_info.clamp_full_axis(axis)
 
-        return self._make_subset_str(local_extent, local_interval, field)
+        return self._make_subset_str(local_access_info, field)
 
-    def _make_subset_str(self, local_extent, local_interval, field):
-        global_extent = self.global_extents[field]
-        res = []
-        if self.decls[field].dimensions[0]:
-            res.append(
-                str(-global_extent[0][0] + local_extent[0][0])
-                + f":__I{-global_extent[0][0] + local_extent[0][1]:+d}"
-            )
-        if self.decls[field].dimensions[1]:
-            res.append(
-                str(-global_extent[1][0] + local_extent[1][0])
-                + f":__J{-global_extent[1][0] + local_extent[1][1]:+d}"
-            )
-        if self.decls[field].dimensions[2]:
-            res.append(
-                get_axis_bound_diff_str(
-                    local_interval.start, self.global_intervals[field].start, "__K"
-                )
-                + ":"
-                + get_axis_bound_diff_str(
-                    local_interval.end, self.global_intervals[field].start, "__K"
-                )
-            )
-        res.extend(f"0:{d}" for d in self.decls[field].data_dims)
-        return ",".join(res)
+    def _make_subset_str(self, local_access_info, field):
+        global_access_info = self.access_infos[field]
+        return make_subset_str(global_access_info, local_access_info, self.decls[field].data_dims)
