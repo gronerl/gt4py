@@ -570,9 +570,16 @@ def make_subset_str(
     context_info: "dcir.FieldAccessInfo", access_info: "dcir.FieldAccessInfo", data_dims
 ):
     res_strs = []
+    clamped_access_info = access_info
+    clamped_context_info = context_info
     for axis in access_info.axes():
-        context_strs = context_info.grid_subset.intervals[axis].idx_range
-        subset_strs = access_info.grid_subset.intervals[axis].idx_range
+        if axis in access_info.variable_offset_axes:
+            clamped_access_info = clamped_access_info.clamp_full_axis(axis)
+            clamped_context_info = clamped_context_info.clamp_full_axis(axis)
+
+    for axis in clamped_access_info.axes():
+        context_strs = clamped_context_info.grid_subset.intervals[axis].idx_range
+        subset_strs = clamped_access_info.grid_subset.intervals[axis].idx_range
         res_strs.append(
             f"({subset_strs[0]})-({context_strs[0]}):({subset_strs[1]})-({context_strs[0]})"
         )
@@ -651,17 +658,6 @@ def union_node_access_infos(nodes: List[eve.Node]):
                     for name, access_info in node.write_accesses.items()
                 }
             )
-    for name, info in read_accesses.items():
-        for axis in info.grid_subset.axes():
-            if axis in info.variable_offset_axes:
-                info = info.clamp_full_axis(axis)
-        read_accesses[name] = info
-
-    for name, info in write_accesses.items():
-        for axis in info.grid_subset.axes():
-            if axis in info.variable_offset_axes:
-                info = info.clamp_full_axis(axis)
-        write_accesses[name] = info
 
     return read_accesses, write_accesses, union_access_info_dicts(read_accesses, write_accesses)
 

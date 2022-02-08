@@ -108,11 +108,11 @@ class Range(Node):
         return {self.var: f"{start}:{end}:{self.stride}"}
 
     @classmethod
-    def from_axis_and_extent(cls, axis: Axis, extent: gt_def.Extent, stride=1):
+    def from_axis_and_interval(cls, axis: Axis, interval: Interval, stride=1):
         return cls(
             var=axis.iteration_symbol(),
-            start=extent[axis.to_idx()][0],
-            end=f"{axis.domain_symbol()}{extent[axis.to_idx()][1]:+d}",
+            start=AxisBound.from_common(axis, interval.start),
+            end=AxisBound.from_common(axis, interval.end),
             stride=stride,
         )
 
@@ -129,6 +129,10 @@ class GridSubset(Node):
         for axis in Axis.dims_3d():
             if axis in self.intervals:
                 yield axis, self.intervals[axis]
+
+    @classmethod
+    def single_gridpoint(cls):
+        return cls(intervals={axis: IndexWithExtent.from_axis(axis) for axis in Axis.dims_3d()})
 
     @property
     def shape(self):
@@ -289,7 +293,11 @@ class FieldAccessInfo(Node):
         else:
             grid_subset.intervals[axis] = full_interval
             grid_subset = grid_subset.set_interval(axis, full_interval)
-        return FieldAccessInfo(grid_subset=grid_subset)
+        return FieldAccessInfo(
+            grid_subset=grid_subset,
+            dynamic_access=self.dynamic_access,
+            variable_offset_axes=self.variable_offset_axes,
+        )
 
 
 class FieldDecl(Node):
@@ -301,7 +309,10 @@ class FieldDecl(Node):
 
     @property
     def shape(self):
-        ijk_shape = self.access_info.grid_subset.shape
+        access_info = self.access_info
+        for axis in self.access_info.variable_offset_axes:
+            access_info = access_info.clamp_full_axis(axis)
+        ijk_shape = access_info.grid_subset.shape
         return ijk_shape + tuple(self.data_dims)
 
     def axes(self):
