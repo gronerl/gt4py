@@ -509,7 +509,7 @@ class AccessInfoCollector(NodeVisitor):
         self,
         node: oir.FieldAccess,
         *,
-        is_write: bool,
+        is_write: bool = False,
         ctx: "AccessInfoCollector.Context",
         is_conditional=False,
         **kwargs,
@@ -669,3 +669,11 @@ def union_access_info_dicts(
     for key, access_info in second_infos.items():
         res[key] = access_info.union(first_infos.get(key, access_info))
     return res
+
+
+def flatten_list(list_or_node: Union[List[Any], eve.Node]) -> List[eve.Node]:
+    list_or_node = [list_or_node]
+    while not all(isinstance(ref, eve.Node) for ref in list_or_node):
+        list_or_node = [r for li in list_or_node for r in li]
+
+    return list_or_node

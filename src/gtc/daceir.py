@@ -362,7 +362,7 @@ class ComputationState(IterationNode):
 
 class DomainLoop(IterationNode, ComputationNode):
     index_range: Range
-    loop_states: List[ComputationState]
+    loop_states: List[Union[ComputationState, "DomainLoop"]]
 
 
 class StateMachine(NestedSDFGNode):

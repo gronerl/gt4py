@@ -26,6 +26,23 @@ from gt4py.definitions import Extent
 from gtc.oir import Decl, FieldDecl, VerticalLoop
 
 
+def set_expansion_order(self, expansion_order):
+    if not set(StencilComputation.expansion_order.default) == set(expansion_order) or not len(
+        StencilComputation.expansion_order.default
+    ) == len(expansion_order):
+        raise ValueError(
+            "StencilComputation.expansion_order must be a permutation of"
+            + str(StencilComputation.expansion_order.default)
+        )
+    if expansion_order.index("K") < expansion_order.index("Sections"):
+        raise ValueError("K iteration must be per section.")
+    if any(expansion_order.index(ij) < expansion_order.index("Stages") for ij in "IJ"):
+        raise ValueError("I and J iteration must be per stage.")
+    if expansion_order.index("Stages") < expansion_order.index("Sections"):
+        raise ValueError("Stages are per-section")
+    self._expansion_order = list(str(eo) for eo in expansion_order)
+
+
 @library.node
 class StencilComputation(library.LibraryNode):
     implementations: Dict[str, dace.library.ExpandTransformation] = {}
@@ -39,7 +56,21 @@ class StencilComputation(library.LibraryNode):
         key_type=int, value_type=Extent, default=None, allow_none=True
     )
     expansion_order = dace.properties.ListProperty(
-        element_type=str, default=["Sections", "K", "Stages", "J", "I"], allow_none=False
+        desc="""
+        currently supported:
+         ["Sections", "Stages", "I", "J", "K"]
+         ["Sections", "Stages", "I", "K", "J"]
+         ["Sections", "Stages", "J", "I", "K"]
+         ["Sections", "Stages", "J", "K", "I"]
+         ["Sections", "Stages", "K", "I", "J"]
+         ["Sections", "Stages", "K", "J", "I"]
+         ["Sections", "K", "Stages", "I", "J"]
+         ["Sections", "K", "Stages", "J", "I"]
+        """,
+        element_type=str,
+        default=["Sections", "Stages", "I", "J", "K"],
+        allow_none=False,
+        setter=set_expansion_order,
     )
 
     _dace_library_name = "StencilComputation"
