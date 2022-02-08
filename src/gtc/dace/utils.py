@@ -16,12 +16,11 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Collection, Dict, Iterator, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Union
 
 import dace
 import dace.data
 import numpy as np
-from dace import SDFG, InterstateEdge
 from pydantic import validator
 
 import eve
@@ -42,11 +41,6 @@ def axes_list_from_flags(flags):
     from gtc import daceir as dcir
 
     return [ax for f, ax in zip(flags, dcir.Axis.dims_3d()) if f]
-
-
-if TYPE_CHECKING:
-    from gtc.dace.nodes import HorizontalExecutionLibraryNode, VerticalLoopLibraryNode
-    from gtc.oir import VerticalLoopSection
 
 
 def data_type_to_dace_typeclass(data_type):
@@ -142,20 +136,6 @@ def get_interval_length_str(interval, var_name):
     )
 
 
-def get_vertical_loop_section_sdfg(section: "VerticalLoopSection") -> SDFG:
-    from gtc.dace.nodes import HorizontalExecutionLibraryNode
-
-    sdfg = SDFG("VerticalLoopSection_" + str(id(section)))
-    old_state = sdfg.add_state("start_state", is_start_state=True)
-    for he in section.horizontal_executions:
-        new_state = sdfg.add_state("HorizontalExecution_" + str(id(he)) + "_state")
-        sdfg.add_edge(old_state, new_state, InterstateEdge())
-        new_state.add_node(HorizontalExecutionLibraryNode(oir_node=he))
-
-        old_state = new_state
-    return sdfg
-
-
 class OIRFieldRenamer(eve.NodeTranslator):
     def visit_FieldAccess(self, node: oir.FieldAccess):
         if node.name not in self._field_table:
@@ -181,38 +161,6 @@ class OIRFieldRenamer(eve.NodeTranslator):
 
     def __init__(self, field_table):
         self._field_table = field_table
-
-
-def get_node_name_mapping(state: dace.SDFGState, node: dace.nodes.LibraryNode):
-
-    name_mapping = dict()
-    for edge in state.in_edges(node):
-        if edge.dst_conn is not None:
-            assert edge.dst_conn.startswith("IN_")
-            internal_name = edge.dst_conn[len("IN_") :]
-            outer_name = edge.data.data
-            if internal_name not in name_mapping:
-                name_mapping[internal_name] = outer_name
-            else:
-                msg = (
-                    f"input and output of field '{internal_name}' to node'{node.name}' refer to "
-                    + "different arrays"
-                )
-                assert name_mapping[internal_name] == outer_name, msg
-    for edge in state.out_edges(node):
-        if edge.src_conn is not None:
-            assert edge.src_conn.startswith("OUT_")
-            internal_name = edge.src_conn[len("OUT_") :]
-            outer_name = edge.data.data
-            if internal_name not in name_mapping:
-                name_mapping[internal_name] = outer_name
-            else:
-                msg = (
-                    f"input and output of field '{internal_name}' to node'{node.name}' refer to"
-                    + "different arrays"
-                )
-                assert name_mapping[internal_name] == outer_name, msg
-    return name_mapping
 
 
 class CartesianIterationSpace(oir.LocNode):
@@ -413,201 +361,6 @@ def oir_field_boundary_computation(stencil: oir.Stencil) -> Dict[str, CartesianI
             offsets = dict()
 
     return access_spaces
-
-
-def get_access_collection(
-    node: Union[dace.SDFG, "HorizontalExecutionLibraryNode", "VerticalLoopLibraryNode"]
-):
-    from gtc.dace.nodes import HorizontalExecutionLibraryNode, VerticalLoopLibraryNode
-
-    if isinstance(node, dace.SDFG):
-        res = AccessCollector.CartesianAccessCollection([])
-        for node in node.states()[0].nodes():
-            if isinstance(node, (HorizontalExecutionLibraryNode, VerticalLoopLibraryNode)):
-                collection = get_access_collection(node)
-                res._ordered_accesses.extend(collection._ordered_accesses)
-        return res
-    elif isinstance(node, HorizontalExecutionLibraryNode):
-        return AccessCollector.apply(node.oir_node)
-    else:
-        assert isinstance(node, VerticalLoopLibraryNode)
-        res = AccessCollector.CartesianAccessCollection([])
-        for _, sdfg in node.sections:
-            collection = get_access_collection(sdfg)
-            res._ordered_accesses.extend(collection._ordered_accesses)
-        return res
-
-
-def nodes_extent_calculation(
-    nodes: Collection[Union["VerticalLoopLibraryNode", "HorizontalExecutionLibraryNode"]]
-) -> Dict[str, Tuple[Tuple[int, int], Tuple[int, int]]]:
-    access_spaces: Dict[str, Tuple[Tuple[int, int], ...]] = dict()
-    inner_nodes = []
-    from gtc.dace.nodes import HorizontalExecutionLibraryNode, VerticalLoopLibraryNode
-
-    for node in nodes:
-        if isinstance(node, VerticalLoopLibraryNode):
-            for _, section_sdfg in node.sections:
-                for he in (
-                    ln
-                    for ln, _ in section_sdfg.all_nodes_recursive()
-                    if isinstance(ln, dace.nodes.LibraryNode)
-                ):
-                    inner_nodes.append(he)
-        else:
-            assert isinstance(node, HorizontalExecutionLibraryNode)
-            inner_nodes.append(node)
-    for node in inner_nodes:
-        access_collection = AccessCollector.apply(node.oir_node)
-        iteration_space = node.iteration_space
-        if iteration_space is not None:
-            for name, offsets in access_collection.offsets().items():
-                for off in offsets:
-                    access_extent = (
-                        (
-                            iteration_space.i_interval.start.offset + off[0],
-                            iteration_space.i_interval.end.offset + off[0],
-                        ),
-                        (
-                            iteration_space.j_interval.start.offset + off[1],
-                            iteration_space.j_interval.end.offset + off[1],
-                        ),
-                    )
-                    if name not in access_spaces:
-                        access_spaces[name] = access_extent
-                    access_spaces[name] = tuple(
-                        (min(asp[0], ext[0]), max(asp[1], ext[1]))
-                        for asp, ext in zip(access_spaces[name], access_extent)
-                    )
-
-    return {
-        name: ((-asp[0][0], asp[0][1]), (-asp[1][0], asp[1][1]))
-        for name, asp in access_spaces.items()
-    }
-
-
-def iter_vertical_loop_section_sub_sdfgs(graph: SDFG) -> Iterator[SDFG]:
-    from gtc.dace.nodes import VerticalLoopLibraryNode
-
-    for node, _ in graph.all_nodes_recursive():
-        if isinstance(node, VerticalLoopLibraryNode):
-            yield from (subgraph for _, subgraph in node.sections)
-
-
-class IntervalMapping:
-    def __init__(self) -> None:
-        self.interval_starts: List[oir.AxisBound] = list()
-        self.interval_ends: List[oir.AxisBound] = list()
-        self.values: List[Any] = list()
-
-    def _setitem_subset_of_existing(self, i: int, key: oir.Interval, value: Any) -> None:
-        start = self.interval_starts[i]
-        end = self.interval_ends[i]
-        if self.values[i] is not value:
-            idx = i
-            if key.start != start:
-                self.interval_ends[i] = key.start
-                self.interval_starts.insert(i + 1, key.start)
-                self.interval_ends.insert(i + 1, key.end)
-                self.values.insert(i + 1, value)
-                idx = i + 1
-            if key.end != end:
-                self.interval_starts.insert(idx + 1, key.end)
-                self.interval_ends.insert(idx + 1, end)
-                self.values.insert(idx + 1, self.values[i])
-                self.interval_ends[idx] = key.end
-                self.values[idx] = value
-
-    def _setitem_partial_overlap(self, i: int, key: oir.Interval, value: Any) -> None:
-        start = self.interval_starts[i]
-        if key.start < start:
-            if self.values[i] is value:
-                self.interval_starts[i] = key.start
-            else:
-                self.interval_starts[i] = key.end
-                self.interval_starts.insert(i, key.start)
-                self.interval_ends.insert(i, key.end)
-                self.values.insert(i, value)
-        else:  # key.end > end
-            if self.values[i] is value:
-                self.interval_ends[i] = key.end
-                nextidx = i + 1
-            else:
-                self.interval_ends[i] = key.start
-                self.interval_starts.insert(i + 1, key.start)
-                self.interval_ends.insert(i + 1, key.end)
-                self.values.insert(i + 1, value)
-                nextidx = i + 2
-            if nextidx < len(self.interval_starts) and (
-                key.intersects(
-                    oir.Interval(
-                        start=self.interval_starts[nextidx], end=self.interval_ends[nextidx]
-                    )
-                )
-                or self.interval_starts[nextidx] == key.end
-            ):
-                if self.values[nextidx] is value:
-                    self.interval_ends[nextidx - 1] = self.interval_ends[nextidx]
-                    del self.interval_starts[nextidx]
-                    del self.interval_ends[nextidx]
-                    del self.values[nextidx]
-                else:
-                    self.interval_starts[nextidx] = key.end
-
-    def __setitem__(self, key: oir.Interval, value: Any) -> None:
-        if not isinstance(key, oir.Interval):
-            raise TypeError("Only OIR intervals supported for method add of IntervalSet.")
-
-        delete = list()
-        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
-            if key.covers(oir.Interval(start=start, end=end)):
-                delete.append(i)
-
-        for i in reversed(delete):  # so indices keep validity while deleting
-            del self.interval_starts[i]
-            del self.interval_ends[i]
-            del self.values[i]
-
-        if len(self.interval_starts) == 0:
-            self.interval_starts.append(key.start)
-            self.interval_ends.append(key.end)
-            self.values.append(value)
-            return
-
-        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
-            if oir.Interval(start=start, end=end).covers(key):
-                self._setitem_subset_of_existing(i, key, value)
-                return
-
-        for i, (start, end) in enumerate(zip(self.interval_starts, self.interval_ends)):
-            if (
-                key.intersects(oir.Interval(start=start, end=end))
-                or start == key.end
-                or end == key.start
-            ):
-                self._setitem_partial_overlap(i, key, value)
-                return
-
-        for i, start in enumerate(self.interval_starts):
-            if start > key.start:
-                self.interval_starts.insert(i, key.start)
-                self.interval_ends.insert(i, key.end)
-                self.values.insert(i, value)
-                return
-        self.interval_starts.append(key.start)
-        self.interval_ends.append(key.end)
-        self.values.append(value)
-        return
-
-    def __getitem__(self, key: oir.Interval) -> List[Any]:
-        if not isinstance(key, oir.Interval):
-            raise TypeError("Only OIR intervals supported for keys of IntervalMapping.")
-
-        res = []
-        for start, end, value in zip(self.interval_starts, self.interval_ends, self.values):
-            if key.intersects(oir.Interval(start=start, end=end)):
-                res.append(value)
-        return res
 
 
 def compute_horizontal_block_extents(node: oir.Stencil) -> Dict[int, Extent]:
@@ -877,3 +630,46 @@ class DaceStrMaker:
     def _make_subset_str(self, local_access_info, field):
         global_access_info = self.access_infos[field]
         return make_subset_str(global_access_info, local_access_info, self.decls[field].data_dims)
+
+
+def union_node_access_infos(nodes: List[eve.Node]):
+    from gtc import daceir as dcir
+
+    read_accesses: Dict[str, dcir.FieldAccessInfo] = dict()
+    write_accesses: Dict[str, dcir.FieldAccessInfo] = dict()
+    for maybe_statenode in nodes:
+        for node in maybe_statenode.iter_tree().if_isinstance(dcir.ComputationNode):
+            read_accesses.update(
+                {
+                    name: access_info.union(read_accesses.get(name, access_info))
+                    for name, access_info in node.read_accesses.items()
+                }
+            )
+            write_accesses.update(
+                {
+                    name: access_info.union(write_accesses.get(name, access_info))
+                    for name, access_info in node.write_accesses.items()
+                }
+            )
+    for name, info in read_accesses.items():
+        for axis in info.grid_subset.axes():
+            if axis in info.variable_offset_axes:
+                info = info.clamp_full_axis(axis)
+        read_accesses[name] = info
+
+    for name, info in write_accesses.items():
+        for axis in info.grid_subset.axes():
+            if axis in info.variable_offset_axes:
+                info = info.clamp_full_axis(axis)
+        write_accesses[name] = info
+
+    return read_accesses, write_accesses, union_access_info_dicts(read_accesses, write_accesses)
+
+
+def union_access_info_dicts(
+    first_infos: Dict[str, "dcir.FieldAccessInfo"], second_infos: Dict[str, "dcir.FieldAccessInfo"]
+):
+    res = dict(first_infos)
+    for key, access_info in second_infos.items():
+        res[key] = access_info.union(first_infos.get(key, access_info))
+    return res

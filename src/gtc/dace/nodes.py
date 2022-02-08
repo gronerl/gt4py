@@ -38,6 +38,9 @@ class StencilComputation(library.LibraryNode):
     extents = dace.properties.DictProperty(
         key_type=int, value_type=Extent, default=None, allow_none=True
     )
+    expansion_order = dace.properties.ListProperty(
+        element_type=str, default=["Sections", "K", "Stages", "J", "I"], allow_none=False
+    )
 
     _dace_library_name = "StencilComputation"
 

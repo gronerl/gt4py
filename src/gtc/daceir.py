@@ -261,11 +261,10 @@ class FieldAccessInfo(Node):
             interval2 = other.grid_subset.intervals[axis]
             if isinstance(interval1, Interval) and isinstance(interval2, Interval):
                 intervals[axis] = Interval.union(interval1, interval2)
-            else:
-                assert isinstance(interval1, IndexWithExtent) and isinstance(
-                    interval2, IndexWithExtent
-                )
+            elif isinstance(interval1, IndexWithExtent) and isinstance(interval2, IndexWithExtent):
                 intervals[axis] = interval1.union(interval2)
+            else:
+                intervals[axis] = interval1 if isinstance(interval1, Interval) else interval2
         variable_offset_axes = [
             axis
             for axis in Axis.dims_3d()
@@ -350,7 +349,7 @@ class ComputationState(IterationNode):
     computations: List[Union[Tasklet, DomainMap]]
 
 
-class DomainLoop(IterationNode):
+class DomainLoop(IterationNode, ComputationNode):
     index_range: Range
     loop_states: List[ComputationState]
 
