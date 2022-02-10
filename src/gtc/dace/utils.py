@@ -391,10 +391,8 @@ class AccessInfoCollector(NodeVisitor):
         access_infos: Dict[str, "dcir.FieldAccessInfo"] = field(default_factory=dict)
 
     def visit_VerticalLoop(
-        self, node: oir.VerticalLoop, *, block_extents, ctx=None, **kwargs: Any
+        self, node: oir.VerticalLoop, *, block_extents, ctx, **kwargs: Any
     ) -> Dict[str, "dcir.FieldAccessInfo"]:
-        if ctx is None:
-            ctx = self.Context()
         for section in reversed(node.sections):
             self.visit(section, block_extents=block_extents, ctx=ctx, **kwargs)
         return ctx.access_infos
@@ -404,14 +402,11 @@ class AccessInfoCollector(NodeVisitor):
         node: oir.VerticalLoopSection,
         *,
         block_extents,
-        ctx=None,
+        ctx,
         grid_subset=None,
         **kwargs: Any,
     ) -> Dict[str, "dcir.FieldAccessInfo"]:
         from gtc import daceir as dcir
-
-        if ctx is None:
-            ctx = self.Context()
 
         inner_ctx = self.Context(
             axes=ctx.axes,
@@ -473,8 +468,8 @@ class AccessInfoCollector(NodeVisitor):
         self.visit(node.left, is_write=True, **kwargs)
 
     def visit_MaskStmt(self, node: oir.MaskStmt, *, is_conditional=False, **kwargs):
-        self.generic_visit(node.mask, is_conditional=is_conditional, **kwargs)
-        self.generic_visit(node.body, is_conditional=True, **kwargs)
+        self.visit(node.mask, is_conditional=is_conditional, **kwargs)
+        self.visit(node.body, is_conditional=True, **kwargs)
 
     def _make_access_info(
         self, offset_node: Union[CartesianOffset, oir.VariableKOffset], axes, is_conditional

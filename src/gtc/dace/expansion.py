@@ -420,7 +420,7 @@ class DaCeIRBuilder(NodeTranslator):
 
         return dcir.DomainLoop(
             index_range=index_range,
-            loop_states=self.to_states(dcir_nodes, grid_subset=grid_subset),
+            loop_states=self.to_state(dcir_nodes, grid_subset=grid_subset),
             grid_subset=grid_subset,
             read_accesses=read_accesses,
             write_accesses=write_accesses,
@@ -553,7 +553,8 @@ class DaCeIRBuilder(NodeTranslator):
             inner_iteration_ctx = section_iteration_ctx.restricted_grid_subset(dcir.Axis.K)
         else:
             inner_iteration_ctx = section_iteration_ctx
-        scope_nodes = self.generic_visit(
+
+        he_nodes = self.generic_visit(
             node.horizontal_executions,
             iteration_ctx=inner_iteration_ctx,
             global_ctx=global_ctx,
@@ -561,6 +562,14 @@ class DaCeIRBuilder(NodeTranslator):
             loop_order=loop_order,
             **kwargs,
         )
+        scope_nodes = [
+            state
+            for he in he_nodes
+            for state in self.to_state(
+                [he],
+                grid_subset=he.grid_subset,
+            )
+        ]
         if expansion_order.index("K") < expansion_order.index("Stages"):
             return self._add_domain_iteration(
                 *scope_nodes,
@@ -571,7 +580,7 @@ class DaCeIRBuilder(NodeTranslator):
                 global_ctx=global_ctx,
             )
         else:
-            return self.to_states(scope_nodes, grid_subset=section_iteration_ctx.grid_subset)
+            return scope_nodes
 
     def to_dataflow(
         self,
@@ -623,7 +632,7 @@ class DaCeIRBuilder(NodeTranslator):
             )
         ]
 
-    def to_states(self, nodes, *, grid_subset: dcir.GridSubset):
+    def to_state(self, nodes, *, grid_subset: dcir.GridSubset):
         if all(isinstance(n, (dcir.ComputationState, dcir.DomainLoop)) for n in nodes):
             return nodes
         elif all(isinstance(n, (dcir.StateMachine, dcir.DomainMap, dcir.Tasklet)) for n in nodes):
@@ -673,7 +682,7 @@ class DaCeIRBuilder(NodeTranslator):
                     symbols[str(sym)] = common.DataType.INT32
 
         return dcir.StateMachine(
-            states=self.to_states(computations, grid_subset=iteration_ctx.grid_subset),
+            states=self.to_state(computations, grid_subset=iteration_ctx.grid_subset),
             field_decls=global_ctx.get_dcir_decls(field_accesses),
             read_accesses={key: field_accesses[key] for key in read_accesses.keys()},
             write_accesses={key: field_accesses[key] for key in write_accesses.keys()},

@@ -68,7 +68,7 @@ class StencilComputation(library.LibraryNode):
          ["Sections", "K", "Stages", "J", "I"]
         """,
         element_type=str,
-        default=["Sections", "Stages", "I", "J", "K"],
+        default=["Sections", "K", "Stages", "J", "I"],
         allow_none=False,
         setter=set_expansion_order,
     )
