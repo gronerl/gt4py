@@ -43,22 +43,22 @@ from .utils import compute_dcir_access_infos, make_subset_str
 
 def make_access_subset_dict(
     extent: gt_def.Extent, interval: oir.Interval, axes: List[dcir.Axis]
-) -> Dict[dcir.Axis, Union[dcir.IndexWithExtent, dcir.Interval]]:
+) -> Dict[dcir.Axis, Union[dcir.IndexWithExtent, dcir.DomainInterval]]:
     from gtc import daceir as dcir
 
-    i_interval = dcir.Interval(
+    i_interval = dcir.DomainInterval(
         start=dcir.AxisBound(level=common.LevelMarker.START, offset=extent[0][0], axis=dcir.Axis.I),
         end=dcir.AxisBound(level=common.LevelMarker.END, offset=extent[0][1], axis=dcir.Axis.I),
     )
-    j_interval = dcir.Interval(
+    j_interval = dcir.DomainInterval(
         start=dcir.AxisBound(level=common.LevelMarker.START, offset=extent[1][0], axis=dcir.Axis.J),
         end=dcir.AxisBound(level=common.LevelMarker.END, offset=extent[1][1], axis=dcir.Axis.J),
     )
-    k_interval: Union[dcir.IndexWithExtent, dcir.Interval]
+    k_interval: Union[dcir.IndexWithExtent, dcir.DomainInterval]
     if isinstance(interval, dcir.IndexWithExtent):
         k_interval = interval
     else:
-        k_interval = dcir.Interval(
+        k_interval = dcir.DomainInterval(
             start=dcir.AxisBound(
                 level=interval.start.level, offset=interval.start.offset, axis=dcir.Axis.K
             ),
@@ -381,7 +381,7 @@ class DaCeIRBuilder(NodeTranslator):
                 grid_subset=grid_subset,
             )
 
-        def restricted_to_interval(self, axis: dcir.Axis, interval: dcir.Interval):
+        def restricted_to_interval(self, axis: dcir.Axis, interval: dcir.DomainInterval):
 
             return DaCeIRBuilder.IterationContext(
                 grid_subset=self.grid_subset.set_interval(axis, interval),
@@ -391,7 +391,7 @@ class DaCeIRBuilder(NodeTranslator):
         self,
         *dcir_nodes: eve.Node,
         axis: dcir.Axis,
-        interval: dcir.Interval,
+        interval: Union[dcir.DomainInterval, oir.Interval, dcir.TileInterval],
         grid_subset: dcir.GridSubset,
         loop_order: common.LoopOrder,
     ):
@@ -409,10 +409,13 @@ class DaCeIRBuilder(NodeTranslator):
         }
 
         stride = -1 if loop_order == common.LoopOrder.BACKWARD else 1
-        start, end = (
-            dcir.AxisBound.from_common(axis, interval.start),
-            dcir.AxisBound.from_common(axis, interval.end),
-        )
+        if isinstance(interval, oir.Interval):
+            start, end = (
+                dcir.AxisBound.from_common(axis, interval.start),
+                dcir.AxisBound.from_common(axis, interval.end),
+            )
+        else:
+            start, end = interval.idx_range
         if loop_order == common.LoopOrder.BACKWARD:
             start, end = f"({end}{stride:+1})", f"({start}{stride:+1})"
 
@@ -430,7 +433,7 @@ class DaCeIRBuilder(NodeTranslator):
         self,
         *dcir_nodes: eve.Node,
         axis: dcir.Axis,
-        interval: dcir.Interval,
+        interval: dcir.DomainInterval,
         grid_subset: dcir.GridSubset,
         global_ctx: "DaCeIRBuilder.GlobalContext",
     ):
@@ -461,7 +464,7 @@ class DaCeIRBuilder(NodeTranslator):
         self,
         *dcir_nodes: eve.Node,
         axis: dcir.Axis,
-        interval: dcir.Interval,
+        interval: dcir.DomainInterval,
         grid_subset: dcir.GridSubset,
         loop_order: common.LoopOrder,
         global_ctx: "DaCeIRBuilder.GlobalContext",
@@ -483,6 +486,37 @@ class DaCeIRBuilder(NodeTranslator):
                 global_ctx=global_ctx,
             )
 
+    def _add_tiling_map(
+        self,
+        *dcir_nodes: eve.Node,
+        global_ctx: "DaCeIRBuilder.GlobalContext",
+    ):
+        from .utils import union_node_access_infos, union_node_grid_subsets, untile_access_info_dict
+
+        grid_subset = union_node_grid_subsets(list(dcir_nodes))
+        read_accesses, write_accesses, _ = union_node_access_infos(list(dcir_nodes))
+        computations = self.to_dataflow(dcir_nodes, global_ctx=global_ctx)
+        for axis, tile_size in global_ctx.library_node.tile_sizes.items():
+            axis = dcir.Axis(axis)
+            grid_subset = grid_subset.untile(axis)
+            read_accesses = untile_access_info_dict(read_accesses, axes=[axis])
+            write_accesses = untile_access_info_dict(write_accesses, axes=[axis])
+            computations = [
+                dcir.DomainMap(
+                    computations=computations,
+                    index_range=dcir.Range(
+                        var=axis.tile_symbol(),
+                        start=dcir.AxisBound.from_common(axis, oir.AxisBound.start()),
+                        end=dcir.AxisBound.from_common(axis, oir.AxisBound.end()),
+                        stride=tile_size,
+                    ),
+                    read_accesses=read_accesses,
+                    write_accesses=write_accesses,
+                    grid_subset=grid_subset,
+                )
+            ]
+        return computations
+
     def visit_HorizontalExecution(
         self,
         node: oir.HorizontalExecution,
@@ -500,6 +534,9 @@ class DaCeIRBuilder(NodeTranslator):
         ijk_subset = dcir.GridSubset.from_gt4py_extent(extent).set_interval(
             dcir.Axis.K, iteration_ctx.grid_subset.intervals[dcir.Axis.K]
         )
+
+        if "Tiling" in expansion_order:
+            ijk_subset = ijk_subset.tile(global_ctx.library_node.tile_sizes)
 
         grid_subset = dcir.GridSubset.single_gridpoint()
 
@@ -588,7 +625,9 @@ class DaCeIRBuilder(NodeTranslator):
         *,
         global_ctx: "DaCeIRBuilder.GlobalContext",
     ):
+        from .utils import flatten_list
 
+        nodes = flatten_list(nodes)
         if all(isinstance(n, (dcir.StateMachine, dcir.DomainMap, dcir.Tasklet)) for n in nodes):
             return nodes
         elif not all(isinstance(n, (dcir.ComputationState, dcir.DomainLoop)) for n in nodes):
@@ -633,6 +672,9 @@ class DaCeIRBuilder(NodeTranslator):
         ]
 
     def to_state(self, nodes, *, grid_subset: dcir.GridSubset):
+        from .utils import flatten_list
+
+        nodes = flatten_list(nodes)
         if all(isinstance(n, (dcir.ComputationState, dcir.DomainLoop)) for n in nodes):
             return nodes
         elif all(isinstance(n, (dcir.StateMachine, dcir.DomainMap, dcir.Tasklet)) for n in nodes):
@@ -648,7 +690,7 @@ class DaCeIRBuilder(NodeTranslator):
         iteration_ctx: "DaCeIRBuilder.IterationContext",
         **kwargs,
     ):
-        from .utils import flatten_list
+        from .utils import flatten_list, union_node_access_infos
 
         computations = flatten_list(
             self.generic_visit(
@@ -660,7 +702,12 @@ class DaCeIRBuilder(NodeTranslator):
             )
         )
 
-        from .utils import union_node_access_infos
+        if "Tiling" in global_ctx.library_node.expansion_order:
+            computations = [
+                self._add_tiling_map(
+                    self.to_dataflow(computations, global_ctx=global_ctx), global_ctx=global_ctx
+                )
+            ]
 
         read_accesses, write_accesses, field_accesses = union_node_access_infos(computations)
 
@@ -748,8 +795,10 @@ class StencilComputationSDFGBuilder(NodeVisitor):
             del self.state_stack[-1]
 
     @staticmethod
-    def _interval_or_idx_range(node: Union[dcir.Interval, dcir.IndexWithExtent]) -> Tuple[str, str]:
-        if isinstance(node, dcir.Interval):
+    def _interval_or_idx_range(
+        node: Union[dcir.DomainInterval, dcir.IndexWithExtent]
+    ) -> Tuple[str, str]:
+        if isinstance(node, dcir.DomainInterval):
             return str(node.start), str(node.end)
         else:
             return f"{node.value}{node.extent[0]:+d}", f"{node.value}{node.extent[1]+1:+d}"
@@ -840,9 +889,13 @@ class StencilComputationSDFGBuilder(NodeVisitor):
                 )
             else:
                 interval = access_info.grid_subset.intervals[axis]
-                if isinstance(interval, dcir.Interval):
+                if isinstance(interval, dcir.DomainInterval):
                     origin_strs.append(
                         f"-({get_axis_bound_str(interval.start, axis.domain_symbol())})"
+                    )
+                elif isinstance(interval, dcir.TileInterval):
+                    origin_strs.append(
+                        f"-({interval.axis.tile_symbol()}{interval.start_offset:+d})"
                     )
                 else:
                     assert isinstance(interval, dcir.IndexWithExtent)
@@ -909,7 +962,7 @@ class StencilComputationSDFGBuilder(NodeVisitor):
                     full_size = (
                         field_decl.access_info.clamp_full_axis(axis)
                         .grid_subset.intervals[axis]
-                        .size
+                        .tile_size
                     )
                     subset_strs.append(f"0:{full_size}")
                 else:
@@ -957,7 +1010,8 @@ class StencilComputationSDFGBuilder(NodeVisitor):
         sdfg_ctx: "StencilComputationSDFGBuilder.SDFGContext",
     ):
         map_entry, map_exit = sdfg_ctx.state.add_map(
-            name=node.index_range.var + "_map", ndrange=self.visit(node.index_range)
+            name=node.index_range.var + "_map",
+            ndrange=self.visit(node.index_range),
         )
 
         input_node_and_conns: Dict[Optional[str], Tuple[dace.nodes.Node, Optional[str]]] = dict()
@@ -1151,7 +1205,7 @@ class StencilComputationExpansion(dace.library.ExpandTransformation):
             start = min(start, section.interval.start)
             end = max(end, section.interval.end)
 
-        overall_interval = dcir.Interval(
+        overall_interval = dcir.DomainInterval(
             start=dcir.AxisBound(axis=dcir.Axis.K, level=start.level, offset=start.offset),
             end=dcir.AxisBound(axis=dcir.Axis.K, level=end.level, offset=end.offset),
         )

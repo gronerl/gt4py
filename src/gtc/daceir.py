@@ -20,6 +20,9 @@ class Axis(StrEnum):
     def domain_symbol(self):
         return "__" + self.upper()
 
+    def tile_symbol(self):
+        return "__tile_" + self.lower()
+
     @staticmethod
     def dims_3d():
         yield from [Axis.I, Axis.J, Axis.K]
@@ -42,7 +45,6 @@ class AxisBound(common.AxisBound):
 class IndexWithExtent(Node):
     value: Union[AxisBound, Int, Str]
     extent: Tuple[int, int]
-    variable: bool = False
 
     @classmethod
     def from_axis(cls, axis: Axis, extent=(0, 0)):
@@ -58,7 +60,6 @@ class IndexWithExtent(Node):
         return IndexWithExtent(
             value=self.value,
             extent=(min(self.extent[0], other.extent[0]), max(self.extent[1], other.extent[1])),
-            variable=self.variable or other.variable,
         )
 
     @property
@@ -66,10 +67,9 @@ class IndexWithExtent(Node):
         return f"{self.value}{self.extent[0]:+d}", f"{self.value}{self.extent[1] + 1:+d}"
 
 
-class Interval(Node):
+class DomainInterval(Node):
     start: AxisBound
     end: AxisBound
-    variable: bool = False
 
     @property
     def size(self):
@@ -82,12 +82,44 @@ class Interval(Node):
         return cls(
             start=min(first.start, second.start),
             end=max(first.end, second.end),
-            variable=first.variable or second.variable,
         )
 
     @property
     def idx_range(self):
         return str(self.start), str(self.end)
+
+
+class TileInterval(Node):
+    axis: Axis
+    start_offset: int
+    end_offset: int
+    tile_size: int
+
+    @property
+    def size(self):
+        return "min({tile_size}, {domain_symbol} - {tile_symbol}){halo_size:+d}".format(
+            tile_size=self.tile_size,
+            domain_symbol=self.axis.domain_symbol(),
+            tile_symbol=self.axis.tile_symbol(),
+            halo_size=self.end_offset - self.start_offset,
+        )
+
+    @classmethod
+    def union(cls, first, second):
+        assert first.axis == second.axis
+        assert first.tile_size == second.tile_size
+        return cls(
+            axis=first.axis,
+            start_offset=min(first.start_offset, second.start_offset),
+            end_offset=max(first.end_offset, second.end_offset),
+            tile_size=first.tile_size,
+        )
+
+    @property
+    def idx_range(self):
+        start = f"{self.axis.tile_symbol()}{self.start_offset:+d}"
+        end = f"{start}+({self.size})"
+        return start, end
 
 
 class Range(Node):
@@ -108,17 +140,24 @@ class Range(Node):
         return {self.var: f"{start}:{end}:{self.stride}"}
 
     @classmethod
-    def from_axis_and_interval(cls, axis: Axis, interval: Interval, stride=1):
+    def from_axis_and_interval(
+        cls, axis: Axis, interval: Union[DomainInterval, TileInterval], stride=1
+    ):
+        if isinstance(interval, (oir.Interval, DomainInterval)):
+            start = get_axis_bound_str(interval.start, axis.domain_symbol())
+            end = get_axis_bound_str(interval.end, axis.domain_symbol())
+        else:
+            start, end = interval.idx_range
         return cls(
             var=axis.iteration_symbol(),
-            start=AxisBound.from_common(axis, interval.start),
-            end=AxisBound.from_common(axis, interval.end),
+            start=start,
+            end=end,
             stride=stride,
         )
 
 
 class GridSubset(Node):
-    intervals: Dict[Axis, Union[Interval, IndexWithExtent]]
+    intervals: Dict[Axis, Union[DomainInterval, TileInterval, IndexWithExtent]]
 
     def __iter__(self):
         for axis in Axis.dims_3d():
@@ -144,16 +183,16 @@ class GridSubset(Node):
         return GridSubset(intervals=intervals)
 
     def set_interval(
-        self, axis: Axis, interval: Union[Interval, IndexWithExtent, oir.Interval]
+        self, axis: Axis, interval: Union[DomainInterval, IndexWithExtent, oir.Interval]
     ) -> "GridSubset":
         if isinstance(interval, oir.Interval):
-            interval = Interval(
+            interval = DomainInterval(
                 start=AxisBound(
                     level=interval.start.level, offset=interval.start.offset, axis=Axis.K
                 ),
                 end=AxisBound(level=interval.end.level, offset=interval.end.offset, axis=Axis.K),
             )
-        elif isinstance(interval, Interval):
+        elif isinstance(interval, DomainInterval):
             assert interval.start.axis == axis
         intervals = dict(self.intervals)
         intervals[axis] = interval
@@ -161,11 +200,11 @@ class GridSubset(Node):
 
     @classmethod
     def from_gt4py_extent(cls, extent: gt_def.Extent):
-        i_interval = Interval(
+        i_interval = DomainInterval(
             start=AxisBound(level=common.LevelMarker.START, offset=extent[0][0], axis=Axis.I),
             end=AxisBound(level=common.LevelMarker.END, offset=extent[0][1], axis=Axis.I),
         )
-        j_interval = Interval(
+        j_interval = DomainInterval(
             start=AxisBound(level=common.LevelMarker.START, offset=extent[1][0], axis=Axis.J),
             end=AxisBound(level=common.LevelMarker.END, offset=extent[1][1], axis=Axis.J),
         )
@@ -173,16 +212,18 @@ class GridSubset(Node):
         return cls(intervals={Axis.I: i_interval, Axis.J: j_interval})
 
     @classmethod
-    def from_interval(cls, interval: Union[oir.Interval, Interval, IndexWithExtent], axis: Axis):
-        if isinstance(interval, (Interval, oir.Interval)):
-            res_interval = Interval(
+    def from_interval(
+        cls, interval: Union[oir.Interval, DomainInterval, IndexWithExtent], axis: Axis
+    ):
+        if isinstance(interval, (DomainInterval, oir.Interval)):
+            res_interval = DomainInterval(
                 start=AxisBound(
                     level=interval.start.level, offset=interval.start.offset, axis=Axis.K
                 ),
                 end=AxisBound(level=interval.end.level, offset=interval.end.offset, axis=Axis.K),
             )
         else:
-            assert isinstance(interval, IndexWithExtent)
+            assert isinstance(interval, (TileInterval, IndexWithExtent))
             res_interval = interval
 
         return cls(intervals={axis: res_interval})
@@ -198,11 +239,72 @@ class GridSubset(Node):
             axes = Axis.dims_3d()
         res_subsets = dict()
         for axis in axes:
-            res_subsets[axis] = Interval(
+            res_subsets[axis] = DomainInterval(
                 start=AxisBound(axis=axis, level=common.LevelMarker.START, offset=0),
                 end=AxisBound(axis=axis, level=common.LevelMarker.END, offset=0),
             )
         return GridSubset(intervals=res_subsets)
+
+    def tile(self, tile_sizes: Dict[Axis, int]):
+        res_intervals = dict()
+        for axis, interval in self.intervals.items():
+            if isinstance(interval, DomainInterval) and axis in tile_sizes:
+                assert (
+                    interval.start.level == common.LevelMarker.START
+                    and interval.end.level == common.LevelMarker.END
+                )
+                res_intervals[axis] = TileInterval(
+                    axis=axis,
+                    tile_size=tile_sizes[axis],
+                    start_offset=interval.start.offset,
+                    end_offset=interval.end.offset,
+                )
+            else:
+                res_intervals[axis] = interval
+        return GridSubset(intervals=res_intervals)
+
+    def untile(self, tile_axes: List[Axis]):
+        res_intervals = dict()
+        for axis, interval in self.intervals.items():
+            if isinstance(interval, TileInterval) and axis in tile_axes:
+                res_intervals[axis] = DomainInterval(
+                    start=AxisBound(
+                        axis=axis, level=common.LevelMarker.START, offset=interval.start_offset
+                    ),
+                    end=AxisBound(
+                        axis=axis, level=common.LevelMarker.END, offset=interval.end_offset
+                    ),
+                )
+            else:
+                res_intervals[axis] = interval
+        return GridSubset(intervals=res_intervals)
+
+    def union(self, other):
+        assert list(self.axes()) == list(other.axes())
+        intervals = dict()
+        for axis in self.axes():
+            interval1 = self.intervals[axis]
+            interval2 = other.intervals[axis]
+            if isinstance(interval1, DomainInterval) and isinstance(interval2, DomainInterval):
+                intervals[axis] = DomainInterval.union(interval1, interval2)
+            elif isinstance(interval1, TileInterval) and isinstance(interval2, TileInterval):
+                intervals[axis] = TileInterval.union(interval1, interval2)
+            elif isinstance(interval1, IndexWithExtent) and isinstance(interval2, IndexWithExtent):
+                intervals[axis] = interval1.union(interval2)
+            else:
+                assert (
+                    isinstance(interval2, (TileInterval, DomainInterval))
+                    and isinstance(interval1, IndexWithExtent)
+                ) or (
+                    isinstance(interval1, (TileInterval, DomainInterval))
+                    and isinstance(interval2, IndexWithExtent)
+                )
+                intervals[axis] = (
+                    interval1
+                    if isinstance(interval1, (TileInterval, DomainInterval))
+                    else interval2
+                )
+        return GridSubset(intervals=intervals)
 
 
 class FieldAccessInfo(Node):
@@ -227,9 +329,9 @@ class FieldAccessInfo(Node):
             if axis in grid_subset.intervals:
                 grid_interval = grid_subset.intervals[axis]
                 assert isinstance(field_interval, IndexWithExtent)
-                if isinstance(grid_interval, Interval):
-                    extent = field_interval.extent
-                    res_intervals[axis] = Interval(
+                extent = field_interval.extent
+                if isinstance(grid_interval, DomainInterval):
+                    res_intervals[axis] = DomainInterval(
                         start=AxisBound(
                             axis=axis,
                             level=grid_interval.start.level,
@@ -240,17 +342,21 @@ class FieldAccessInfo(Node):
                             level=grid_interval.end.level,
                             offset=grid_interval.end.offset + extent[1],
                         ),
-                        variable=field_interval.variable,
+                    )
+                elif isinstance(grid_interval, TileInterval):
+                    res_intervals[axis] = TileInterval(
+                        axis=axis,
+                        tile_size=grid_interval.tile_size,
+                        start_offset=grid_interval.start_offset + extent[0],
+                        end_offset=grid_interval.end_offset + extent[1],
                     )
                 else:
                     assert field_interval.value == grid_interval.value
                     extent = (
-                        min(field_interval.extent) + grid_interval.extent[0],
-                        max(field_interval.extent) + grid_interval.extent[1],
+                        min(extent) + grid_interval.extent[0],
+                        max(extent) + grid_interval.extent[1],
                     )
-                    res_intervals[axis] = IndexWithExtent(
-                        value=field_interval.value, extent=extent, variable=field_interval.variable
-                    )
+                    res_intervals[axis] = IndexWithExtent(value=field_interval.value, extent=extent)
         return FieldAccessInfo(
             grid_subset=GridSubset(intervals=res_intervals),
             dynamic_access=self.dynamic_access,
@@ -258,24 +364,14 @@ class FieldAccessInfo(Node):
         )
 
     def union(self, other: "FieldAccessInfo"):
-        assert list(self.axes()) == list(other.axes())
-        intervals = dict()
-        for axis in self.axes():
-            interval1 = self.grid_subset.intervals[axis]
-            interval2 = other.grid_subset.intervals[axis]
-            if isinstance(interval1, Interval) and isinstance(interval2, Interval):
-                intervals[axis] = Interval.union(interval1, interval2)
-            elif isinstance(interval1, IndexWithExtent) and isinstance(interval2, IndexWithExtent):
-                intervals[axis] = interval1.union(interval2)
-            else:
-                intervals[axis] = interval1 if isinstance(interval1, Interval) else interval2
+        grid_subset = self.grid_subset.union(other.grid_subset)
         variable_offset_axes = [
             axis
             for axis in Axis.dims_3d()
             if axis in self.variable_offset_axes or axis in other.variable_offset_axes
         ]
         return FieldAccessInfo(
-            grid_subset=GridSubset(intervals=intervals),
+            grid_subset=grid_subset,
             dynamic_access=self.dynamic_access or other.dynamic_access,
             variable_offset_axes=variable_offset_axes,
         )
@@ -283,12 +379,12 @@ class FieldAccessInfo(Node):
     def clamp_full_axis(self, axis):
         grid_subset = GridSubset(intervals=self.grid_subset.intervals)
         interval = self.grid_subset.intervals[axis]
-        full_interval = Interval(
+        full_interval = DomainInterval(
             start=AxisBound(level=common.LevelMarker.START, offset=0, axis=axis),
             end=AxisBound(level=common.LevelMarker.END, offset=0, axis=axis),
         )
-        if isinstance(interval, Interval):
-            interval_union = Interval.union(interval, full_interval)
+        if isinstance(interval, DomainInterval):
+            interval_union = DomainInterval.union(interval, full_interval)
             grid_subset.intervals[axis] = interval_union
         else:
             grid_subset.intervals[axis] = full_interval

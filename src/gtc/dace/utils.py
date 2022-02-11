@@ -485,9 +485,7 @@ class AccessInfoCollector(NodeVisitor):
         intervals = dict()
         for axis in axes:
             if axis in variable_offset_axes:
-                intervals[axis] = dcir.IndexWithExtent(
-                    value=axis.iteration_symbol(), extent=[0, 0], variable=True
-                )
+                intervals[axis] = dcir.IndexWithExtent(value=axis.iteration_symbol(), extent=[0, 0])
             else:
                 intervals[axis] = dcir.IndexWithExtent(
                     value=axis.iteration_symbol(),
@@ -634,25 +632,48 @@ class DaceStrMaker:
         return make_subset_str(global_access_info, local_access_info, self.decls[field].data_dims)
 
 
+def untile_access_info_dict(access_infos: Dict[str, "dcir.FieldAccessInfo"], axes):
+    from gtc import daceir as dcir
+
+    res_infos = dict()
+    for name, access_info in access_infos.items():
+        res_infos[name] = dcir.FieldAccessInfo(
+            dynamic_access=access_info.dynamic_access,
+            variable_offset_axes=access_info.variable_offset_axes,
+            grid_subset=access_info.grid_subset.untile(axes),
+        )
+    return res_infos
+
+
+def union_node_grid_subsets(nodes: List[eve.Node]):
+    grid_subset = None
+
+    for node in collect_toplevel_iteration_nodes(nodes):
+        if grid_subset is None:
+            grid_subset = node.grid_subset
+        grid_subset = grid_subset.union(node.grid_subset)
+
+    return grid_subset
+
+
 def union_node_access_infos(nodes: List[eve.Node]):
     from gtc import daceir as dcir
 
     read_accesses: Dict[str, dcir.FieldAccessInfo] = dict()
     write_accesses: Dict[str, dcir.FieldAccessInfo] = dict()
-    for maybe_statenode in nodes:
-        for node in maybe_statenode.iter_tree().if_isinstance(dcir.ComputationNode):
-            read_accesses.update(
-                {
-                    name: access_info.union(read_accesses.get(name, access_info))
-                    for name, access_info in node.read_accesses.items()
-                }
-            )
-            write_accesses.update(
-                {
-                    name: access_info.union(write_accesses.get(name, access_info))
-                    for name, access_info in node.write_accesses.items()
-                }
-            )
+    for node in collect_toplevel_computation_nodes(nodes):
+        read_accesses.update(
+            {
+                name: access_info.union(read_accesses.get(name, access_info))
+                for name, access_info in node.read_accesses.items()
+            }
+        )
+        write_accesses.update(
+            {
+                name: access_info.union(write_accesses.get(name, access_info))
+                for name, access_info in node.write_accesses.items()
+            }
+        )
 
     return read_accesses, write_accesses, union_access_info_dicts(read_accesses, write_accesses)
 
@@ -666,9 +687,36 @@ def union_access_info_dicts(
     return res
 
 
-def flatten_list(list_or_node: Union[List[Any], eve.Node]) -> List[eve.Node]:
+def flatten_list(list_or_node: Union[List[Any], eve.Node]):
     list_or_node = [list_or_node]
     while not all(isinstance(ref, eve.Node) for ref in list_or_node):
         list_or_node = [r for li in list_or_node for r in li]
-
     return list_or_node
+
+
+def collect_toplevel_computation_nodes(
+    list_or_node: Union[List[Any], eve.Node]
+) -> List["dcir.ComputationNode"]:
+    from gtc import daceir as dcir
+
+    class ComputationNodeCollector(eve.NodeVisitor):
+        def visit_ComputationNode(self, node: dcir.ComputationNode, *, collection: List):
+            collection.append(node)
+
+    collection: List[dcir.ComputationNode] = []
+    ComputationNodeCollector().visit(list_or_node, collection=collection)
+    return collection
+
+
+def collect_toplevel_iteration_nodes(
+    list_or_node: Union[List[Any], eve.Node]
+) -> List["dcir.IterationNode"]:
+    from gtc import daceir as dcir
+
+    class IterationNodeCollector(eve.NodeVisitor):
+        def visit_IterationNode(self, node: dcir.IterationNode, *, collection: List):
+            collection.append(node)
+
+    collection: List[dcir.IterationNode] = []
+    IterationNodeCollector().visit(list_or_node, collection=collection)
+    return collection

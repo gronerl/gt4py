@@ -55,6 +55,9 @@ class StencilComputation(library.LibraryNode):
     extents = dace.properties.DictProperty(
         key_type=int, value_type=Extent, default=None, allow_none=True
     )
+    tile_sizes = dace.properties.DictProperty(
+        key_type=str, value_type=int, default={"I": 8, "J": 8}, allow_none=True
+    )
     expansion_order = dace.properties.ListProperty(
         desc="""
         currently supported:
@@ -68,7 +71,7 @@ class StencilComputation(library.LibraryNode):
          ["Sections", "K", "Stages", "J", "I"]
         """,
         element_type=str,
-        default=["Sections", "K", "Stages", "J", "I"],
+        default=["Tiling", "Sections", "K", "Stages", "J", "I"],
         allow_none=False,
         setter=set_expansion_order,
     )
