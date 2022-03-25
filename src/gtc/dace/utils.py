@@ -387,12 +387,14 @@ class CartesianIJIndexSpace(tuple):
 
     @staticmethod
     def from_access(access: GenericAccess):
-        if access.region is None:
+        if access.horizontal_mask is None:
             return CartesianIJIndexSpace.from_offset(access.offset)
 
         res = []
 
-        for interval, off in zip((access.region.i, access.region.j), access.offset[:2]):
+        for interval, off in zip(
+            (access.horizontal_mask.i, access.horizontal_mask.j), access.offset[:2]
+        ):
             dim_tuple = [0, 0]
             if interval.start is not None:
                 if interval.start.level == common.LevelMarker.START:
@@ -447,13 +449,13 @@ class CartesianIJIndexSpace(tuple):
 
 
 def iteration_to_access_space(iteration_space: CartesianIJIndexSpace, access: GenericAccess):
-    if access.region is None:
+    if access.horizontal_mask is None:
         return CartesianIJIndexSpace.from_access(access).compose(iteration_space)
 
     res = []
 
     for region_interval, index_interval, off in zip(
-        (access.region.i, access.region.j),
+        (access.horizontal_mask.i, access.horizontal_mask.j),
         iteration_space,
         access.offset[:2],
     ):
@@ -589,7 +591,7 @@ def nodes_extent_calculation(
         iteration_space = node.iteration_space
         if iteration_space is not None:
             for acc in access_collection.ordered_accesses():
-                if acc.region is None:
+                if acc.horizontal_mask is None:
 
                     access_extent: List[Tuple[int, int]] = [
                         (
@@ -605,7 +607,7 @@ def nodes_extent_calculation(
                     access_extent = []
                     for dim, region_interval, iteration_interval in zip(
                         (0, 1),
-                        (acc.region.i, acc.region.j),
+                        (acc.horizontal_mask.i, acc.horizontal_mask.j),
                         (iteration_space.i_interval, iteration_space.j_interval),
                     ):
                         ext = [0, 0]

@@ -262,7 +262,20 @@ class TaskletCodegen(codegen.TemplatedGenerator):
         delim = f"\n{indent}"
         return f"while {cond}:\n{indent}{delim.join(body)}"
 
-    def visit_HorizontalRestriction(
+    def visit_HorizontalRestriction(self, node: oir.HorizontalRestriction, **kwargs):
+        mask_str = ""
+        indent = ""
+        if node.mask is not None:
+            cond_str = self.visit(node.mask, is_target=False, **kwargs)
+            if cond_str:
+                mask_str = f"if {cond_str}:"
+                indent = "    "
+        body_code = self.visit(node.body, **kwargs)
+        body_code = [line for block in body_code for line in block.split("\n")]
+        body_code = [indent + b for b in body_code]
+        return "\n".join([mask_str] + body_code)
+
+    def visit_HorizontalMask(
         self, node: oir.HorizontalRestriction, *, index_symbols, global_domain_symbols, **kwargs
     ):
         clauses: List[str] = []
@@ -688,12 +701,12 @@ class NaiveHorizontalExecutionExpander(OIRLibraryNodeExpander):
 
         origins = dict()
         for acc in access_collection.ordered_accesses():
-            if compensate_regions and acc.region is not None:
+            if compensate_regions and acc.horizontal_mask is not None:
                 offset = []
                 iteration_space = self.node.iteration_space
                 for dim, interval, iteration_interval in zip(
                     (0, 1),
-                    (acc.region.i, acc.region.j),
+                    (acc.horizontal_mask.i, acc.horizontal_mask.j),
                     (iteration_space.i_interval, iteration_space.j_interval),
                 ):
                     if interval.start is None:
@@ -739,7 +752,9 @@ class NaiveHorizontalExecutionExpander(OIRLibraryNodeExpander):
             self.node
         )
         region_accesses = {
-            acc.field for acc in access_collection.ordered_accesses() if acc.region is not None
+            acc.field
+            for acc in access_collection.ordered_accesses()
+            if acc.horizontal_mask is not None
         }
         variable_k_accesses = {
             acc.name
@@ -752,14 +767,18 @@ class NaiveHorizontalExecutionExpander(OIRLibraryNodeExpander):
 
         dynamic_accesses = {
             get_tasklet_symbol(acc.name, acc_to_offset_tuple(acc), is_target=False)
-            for maskstmt in self.node.oir_node.iter_tree().if_isinstance(oir.MaskStmt)
+            for maskstmt in self.node.oir_node.iter_tree().if_isinstance(
+                oir.MaskStmt, oir.HorizontalRestriction
+            )
             for stmt in maskstmt.body
             for assign in stmt.iter_tree().if_isinstance(oir.AssignStmt)
             for acc in assign.right.iter_tree().if_isinstance(oir.FieldAccess)
         }
         dynamic_accesses |= {
             get_tasklet_symbol(acc.name, acc_to_offset_tuple(acc), is_target=True)
-            for maskstmt in self.node.oir_node.iter_tree().if_isinstance(oir.MaskStmt)
+            for maskstmt in self.node.oir_node.iter_tree().if_isinstance(
+                oir.MaskStmt, oir.HorizontalRestriction
+            )
             for stmt in maskstmt.body
             for assign in stmt.iter_tree().if_isinstance(oir.AssignStmt)
             for acc in assign.left.iter_tree().if_isinstance(oir.FieldAccess)
@@ -907,7 +926,9 @@ class NaiveHorizontalExecutionExpander(OIRLibraryNodeExpander):
 
         access_collection: AccessCollector.Result = get_access_collection(self.node)
         region_fields = {
-            acc.field for acc in access_collection.ordered_accesses() if acc.region is not None
+            acc.field
+            for acc in access_collection.ordered_accesses()
+            if acc.horizontal_mask is not None
         }
         variable_k_fields = {
             acc.field for acc in access_collection.ordered_accesses() if acc.offset[2] is None
