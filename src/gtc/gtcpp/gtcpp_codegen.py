@@ -218,7 +218,9 @@ class GTCppCodegen(codegen.TemplatedGenerator):
         """
     )
 
-    While = as_mako("while(${cond}) {${''.join(body)}}")
+    While = as_mako(
+        "int whilectr=0;while((${cond}) && whilectr < 80) {${''.join(body)}; whilectr++;}"
+    )
 
     BlockStmt = as_mako("{${''.join(body)}}")
 

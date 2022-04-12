@@ -154,9 +154,54 @@ class OIRToGTCpp(eve.NodeTranslator):
         return gtcpp.Temporary(name=node.name, dtype=node.dtype)
 
     def visit_VariableKOffset(
-        self, node: oir.VariableKOffset, **kwargs: Any
+        self,
+        node: oir.VariableKOffset,
+        *,
+        comp_ctx: "OIRToGTCpp.GTComputationContext",
+        **kwargs: Any,
     ) -> gtcpp.VariableKOffset:
-        return gtcpp.VariableKOffset(k=self.visit(node.k, **kwargs))
+        comp_ctx.add_axis_index("K")
+        comp_ctx.add_axis_endpoint("K")
+        raw_offset = self.visit(node.k, **kwargs)
+        distance_from_start = gtcpp.UnaryOp(
+            op=common.UnaryOperator.NEG,
+            expr=gtcpp.Cast(
+                dtype=raw_offset.dtype,
+                expr=gtcpp.AccessorRef(
+                    name=comp_ctx.axis_indices["K"],
+                    offset=common.CartesianOffset.zero(),
+                    dtype=raw_offset.dtype,
+                ),
+            ),
+        )
+        max_clamped_offset = gtcpp.NativeFuncCall(
+            func=common.NativeFunction.MAX,
+            args=[
+                distance_from_start,
+                gtcpp.Cast(dtype=raw_offset.dtype, expr=raw_offset),
+            ],
+        )
+        distance_from_end = gtcpp.BinaryOp(
+            op=common.ArithmeticOperator.SUB,
+            left=gtcpp.AccessorRef(
+                name=comp_ctx.axis_endpoints["K"],
+                offset=common.CartesianOffset.zero(),
+                dtype=raw_offset.dtype,
+            ),
+            right=gtcpp.AccessorRef(
+                name=comp_ctx.axis_indices["K"],
+                offset=common.CartesianOffset.zero(),
+                dtype=raw_offset.dtype,
+            ),
+        )
+        clamped_offset = gtcpp.NativeFuncCall(
+            func=common.NativeFunction.MIN,
+            args=[
+                gtcpp.Cast(dtype=raw_offset.dtype, expr=distance_from_end),
+                gtcpp.Cast(dtype=raw_offset.dtype, expr=max_clamped_offset),
+            ],
+        )
+        return gtcpp.VariableKOffset(k=clamped_offset)
 
     def visit_FieldAccess(self, node: oir.FieldAccess, **kwargs: Any) -> gtcpp.AccessorRef:
         return gtcpp.AccessorRef(
