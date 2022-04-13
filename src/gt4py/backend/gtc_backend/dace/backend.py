@@ -107,6 +107,8 @@ class GTCDaCeExtGenerator(BackendCodegen):
         oir_node = oir_pipeline.run(base_oir)
         sdfg = OirSDFGBuilder().visit(oir_node)
 
+        unexpanded_sdfg_json = dumps(sdfg.to_json())
+
         sdfg = _expand_and_finalize_sdfg(stencil_ir, sdfg, self.backend.storage_info["layout_map"])
 
         for tmp_sdfg in sdfg.all_sdfgs_recursive():
@@ -130,7 +132,7 @@ class GTCDaCeExtGenerator(BackendCodegen):
         sources = {
             "computation": {"computation.hpp": implementation},
             "bindings": {"bindings.cpp": bindings},
-            "info": {self.backend.builder.module_name + ".sdfg": dumps(sdfg.to_json())},
+            "info": {self.backend.builder.module_name + ".sdfg": unexpanded_sdfg_json},
         }
         return sources
 
