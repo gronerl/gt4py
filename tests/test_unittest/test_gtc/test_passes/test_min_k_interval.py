@@ -127,6 +127,14 @@ def stencil_with_extent_6(field_a: gs.Field[float], field_b: gs.Field[float]):
         field_a = field_b[0, 0, -5] + field_b[0, 0, 3]
 
 
+@register_test_case(k_bounds=(0, 0), min_k_size=0)
+def stencil_variable_and_constant_offset(
+    field_a: gs.Field[float], field_b: gs.Field[float], offset: gs.Field[int]
+):
+    with computation(PARALLEL), interval(0, -1):
+        field_a = field_b[0, 0, 1] + field_b[0, 0, offset]
+
+
 @pytest.mark.parametrize("definition,expected_k_bounds", [(s, d["k_bounds"]) for s, d in test_data])
 def test_k_bounds(definition, expected_k_bounds):
     builder = StencilBuilder(definition, backend=from_name("numpy"))
@@ -156,32 +164,40 @@ def test_k_bounds_exec(definition, expected):
     if required_field_size > 0:
         backend = "gt:cpu_ifirst"
         compiled_stencil = stencil(backend, definition)
-        field_a = gt4py.storage.zeros(
-            backend=backend,
-            default_origin=(0, 0, 0),
-            shape=(1, 1, expected_min_k_size),
-            dtype=np.float64,
+        print(expected_min_k_size, required_field_size)
+        fields = dict(
+            field_a=gt4py.storage.zeros(
+                backend=backend,
+                default_origin=(0, 0, 0),
+                shape=(1, 1, expected_min_k_size),
+                dtype=np.float64,
+            ),
+            field_b=gt4py.storage.ones(
+                backend=backend,
+                default_origin=(0, 0, 0),
+                shape=(1, 1, required_field_size),
+                dtype=np.float64,
+            ),
         )
-        field_b = gt4py.storage.ones(
-            backend=backend,
-            default_origin=(0, 0, 0),
-            shape=(1, 1, required_field_size),
-            dtype=np.float64,
-        )
+        if "offset" in compiled_stencil.field_info:
+            fields["offset"] = gt4py.storage.ones(
+                backend=backend,
+                default_origin=(0, 0, 0),
+                shape=(1, 1, required_field_size),
+                dtype=int,
+            )
 
         # test with correct domain, origin to low
         with pytest.raises(ValueError, match="Origin for field field_b too small"):
             compiled_stencil(
-                field_a,
-                field_b,
+                **fields,
                 domain=(1, 1, expected_min_k_size),
                 origin={"field_b": (0, 0, expected_k_bounds[0] - 1)},
             )
 
         # test with correct domain, correct origin
         compiled_stencil(
-            field_a,
-            field_b,
+            **fields,
             domain=(1, 1, expected_min_k_size),
             origin={"field_b": (0, 0, expected_k_bounds[0])},
         )
@@ -189,8 +205,7 @@ def test_k_bounds_exec(definition, expected):
         # test with wrong domain, correct origin
         with pytest.raises(ValueError, match="Compute domain too small. Sequential axis"):
             compiled_stencil(
-                field_a,
-                field_b,
+                **fields,
                 domain=(1, 1, expected_min_k_size - 1),
                 origin={"field_b": (0, 0, expected_k_bounds[0])},
             )
