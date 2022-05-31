@@ -16,7 +16,7 @@ import abc
 import numbers
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import jinja2
 import numpy
@@ -43,14 +43,14 @@ class ModuleData:
     unreferenced: List[str] = field(default_factory=list)
 
     @property
-    def field_names(self) -> Set[str]:
+    def field_names(self) -> List[str]:
         """Set of all field names."""
-        return set(self.field_info.keys())
+        return list(sorted(self.field_info.keys()))
 
     @property
-    def parameter_names(self) -> Set[str]:
+    def parameter_names(self) -> List[str]:
         """Set of all parameter names."""
-        return set(self.parameter_info.keys())
+        return list(sorted(self.parameter_info.keys()))
 
 
 def make_args_data_from_gtir(pipeline: GtirPipeline) -> ModuleData:
