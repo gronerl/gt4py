@@ -128,7 +128,8 @@ def get_dace_symbol(name: common.SymbolRef, dtype: common.DataType = common.Data
 
 
 def data_type_to_dace_typeclass(data_type):
-    dtype = np.dtype(data_type_to_typestr(data_type))
+    typestr = data_type_to_typestr(data_type).replace("f8", "f4")
+    dtype = np.dtype(typestr)
     return dace.dtypes.typeclass(dtype.type)
 
 

@@ -182,11 +182,11 @@ class TaskletCodegen(codegen.TemplatedGenerator):
         elif dtype == common.DataType.INT32:
             return "dace.int32"
         elif dtype == common.DataType.INT64:
-            return "dace.int64"
+            return "dace.int32"
         elif dtype == common.DataType.FLOAT32:
             return "dace.float32"
         elif dtype == common.DataType.FLOAT64:
-            return "dace.float64"
+            return "dace.float32"
         raise NotImplementedError("Not implemented DataType encountered.")
 
     def visit_UnaryOperator(self, op: common.UnaryOperator, **kwargs: Any) -> str:
