@@ -1038,6 +1038,8 @@ class IRMaker(ast.NodeVisitor):
             )
         elif isinstance(value, numbers.Number):
             data_type = nodes.DataType.from_dtype(np.dtype(type(value)))
+            data_type = data_type if data_type != nodes.DataType.FLOAT64 else nodes.DataType.FLOAT32
+            data_type = data_type if data_type != nodes.DataType.INT64 else nodes.DataType.INT64
             return nodes.ScalarLiteral(value=value, data_type=data_type)
         else:
             raise GTScriptSyntaxError(

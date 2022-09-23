@@ -214,7 +214,7 @@ class NpirCodegen(TemplatedGenerator):
     def visit_DataType(self, node: common.DataType, **kwargs: Any) -> Union[str, Collection[str]]:
         # `np.bool` is a deprecated alias for the builtin `bool` or `np.bool_`.
         if node not in {common.DataType.BOOL}:
-            return f"np.{node.name.lower()}".replace("64", "32")
+            return f"np.{node.name.lower()}"
         else:
             return node.name.lower()
 
