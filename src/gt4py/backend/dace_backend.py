@@ -41,7 +41,6 @@ from gt4py.backend.gtc_common import (
 from gt4py.backend.module_generator import make_args_data_from_gtir
 from gt4py.utils import shash
 from gtc import common, gtir
-from gtc.dace.expansion_specification import Map
 from gtc.dace.nodes import StencilComputation
 from gtc.dace.oir_to_dace import OirSDFGBuilder
 from gtc.dace.partial_expansion import partially_expand
