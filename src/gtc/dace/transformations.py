@@ -14,11 +14,7 @@ class NoEmptyEdgeTrivialMapElimination(TrivialMapElimination):
 
         map_entry = self.map_entry
         map_exit = graph.exit_node(map_entry)
-        if map_entry.map.schedule not in {
-            dace.ScheduleType.Sequential,
-            dace.ScheduleType.CPU_Multicore,
-        }:
-            return False
+
         if any(
             edge.data.is_empty() for edge in graph.in_edges(map_entry) + graph.out_edges(map_exit)
         ):
