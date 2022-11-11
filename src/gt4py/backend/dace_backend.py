@@ -474,16 +474,19 @@ class DaCeComputationCodegen:
 
     def generate_tmp_allocs(self, sdfg):
 
-        global_fmt = "dace_handle.__{sdfg_id}_{name} = allocate(allocator, gt::meta::lazy::id<{dtype}>(), {size})();"
+        allocator_fmt = (
+            "__{sdfg_id}_{name} = allocate(allocator, gt::meta::lazy::id<{dtype}>(), {size})();"
+        )
         threadlocal_fmt = (
-            "{name} = dace_handle.__{sdfg_id}_{name} + omp_get_thread_num() * ({local_size});"
+            "__{sdfg_id}_{name} = pool__{sdfg_id}_{name} + omp_get_thread_num() * ({local_size});"
         )
         res = []
         for array_sdfg, name, array in sdfg.arrays_recursive():
             if array.transient and array.lifetime == dace.AllocationLifetime.Persistent:
                 if array.storage != dace.StorageType.CPU_ThreadLocal:
+                    fmt = "dace_handle." + allocator_fmt
                     res.append(
-                        global_fmt.format(
+                        fmt.format(
                             name=name,
                             sdfg_id=array_sdfg.sdfg_id,
                             dtype=array.dtype.ctype,
@@ -491,7 +494,13 @@ class DaCeComputationCodegen:
                         )
                     )
                 else:
-                    fmts = [global_fmt, "#pragma omp parallel", "{{", threadlocal_fmt, "}}"]
+                    fmts = [
+                        "{dtype}* pool" + allocator_fmt,
+                        "#pragma omp parallel",
+                        "{{",
+                        threadlocal_fmt,
+                        "}}",
+                    ]
                     res.extend(
                         [
                             fmt.format(
