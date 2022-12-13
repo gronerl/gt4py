@@ -513,7 +513,7 @@ class TestMultipleStencilsPartialExpansionIJ:
 
         # bring nodes to IJ-expandable form
         for node, _ in filter(
-            lambda n: isinstance(n, StencilComputation), sdfg.all_nodes_recursive()
+            lambda n: isinstance(n[0], StencilComputation), sdfg.all_nodes_recursive()
         ):
             node.expansion_specification = [
                 "TileJ",
@@ -552,7 +552,7 @@ class TestMultipleStencilsPartialExpansionIJ:
 
         # bring nodes to IJ-expandable form
         for node, _ in filter(
-            lambda n: isinstance(n, StencilComputation), sdfg.all_nodes_recursive()
+            lambda n: isinstance(n[0], StencilComputation), sdfg.all_nodes_recursive()
         ):
             node.expansion_specification = [
                 "TileJ",
@@ -591,7 +591,7 @@ class TestMultipleStencilsPartialExpansionIJ:
 
         # bring nodes to IJ-expandable form
         for node, _ in filter(
-            lambda n: isinstance(n, StencilComputation), sdfg.all_nodes_recursive()
+            lambda n: isinstance(n[0], StencilComputation), sdfg.all_nodes_recursive()
         ):
             node.expansion_specification = [
                 "TileJ",
