@@ -24,6 +24,7 @@ from gt4py import gtscript
 from gt4py import storage as gt_storage
 from gt4py.gtscript import PARALLEL, computation, interval
 from gt4py.stencil_builder import StencilBuilder
+from gtc.dace.nodes import StencilComputation
 from gtc.dace.partial_expansion import partially_expand
 
 
@@ -471,6 +472,21 @@ class TestMultipleStencilsPartialExpansionIJ:
             stencil_inextents_2(inp2=inp2, outp2=outp2)
 
         sdfg = orchestration.to_sdfg()
+
+        # bring nodes to IJ-expandable form
+        for node, _ in filter(
+            lambda n: isinstance(n[0], StencilComputation), sdfg.all_nodes_recursive()
+        ):
+            node.expansion_specification = [
+                "TileJ",
+                "TileI",
+                "Sections",
+                "K",
+                "Stages",
+                "JMap",
+                "IMap",
+            ]
+
         partially_expand(sdfg)
         assert (
             len(
@@ -494,6 +510,21 @@ class TestMultipleStencilsPartialExpansionIJ:
             stencil_noextents(inp=tmp, outp=outp)
 
         sdfg = orchestration.to_sdfg()
+
+        # bring nodes to IJ-expandable form
+        for node, _ in filter(
+            lambda n: isinstance(n, StencilComputation), sdfg.all_nodes_recursive()
+        ):
+            node.expansion_specification = [
+                "TileJ",
+                "TileI",
+                "Sections",
+                "K",
+                "Stages",
+                "JMap",
+                "IMap",
+            ]
+
         partially_expand(sdfg)
         assert (
             len(
@@ -518,6 +549,21 @@ class TestMultipleStencilsPartialExpansionIJ:
             stencil_inextents_4(field_b=inp, field_c=out2, tmp=tmp)
 
         sdfg = orchestration.to_sdfg()
+
+        # bring nodes to IJ-expandable form
+        for node, _ in filter(
+            lambda n: isinstance(n, StencilComputation), sdfg.all_nodes_recursive()
+        ):
+            node.expansion_specification = [
+                "TileJ",
+                "TileI",
+                "Sections",
+                "K",
+                "Stages",
+                "JMap",
+                "IMap",
+            ]
+
         partially_expand(sdfg)
 
         assert (
@@ -542,6 +588,21 @@ class TestMultipleStencilsPartialExpansionIJ:
             stencil_inextents_1(inp1=tmp, outp1=outp)
 
         sdfg = orchestration.to_sdfg(tmp=tmp)
+
+        # bring nodes to IJ-expandable form
+        for node, _ in filter(
+            lambda n: isinstance(n, StencilComputation), sdfg.all_nodes_recursive()
+        ):
+            node.expansion_specification = [
+                "TileJ",
+                "TileI",
+                "Sections",
+                "K",
+                "Stages",
+                "JMap",
+                "IMap",
+            ]
+
         sdfg.arrays["tmp"].transient = True
         partially_expand(sdfg)
         assert (
