@@ -993,6 +993,8 @@ def test_implicit_broadcast_mixed_dims(fieldview_backend):
 def test_tuple_unpacking(fieldview_backend):
     if fieldview_backend in [gtfn_cpu.run_gtfn, gtfn_cpu.run_gtfn_imperative]:
         pytest.skip("Tuple arguments are not supported in gtfn yet.")
+    if fieldview_backend == dace_iterator.run_dace_iterator:
+        pytest.skip("DaCe backend doesn't support tuples")
 
     size = 10
     inp = np_as_located_field(IDim)(np.ones((size)))
@@ -1026,6 +1028,8 @@ def test_tuple_unpacking(fieldview_backend):
 def test_tuple_unpacking_star_multi(fieldview_backend):
     if fieldview_backend in [gtfn_cpu.run_gtfn, gtfn_cpu.run_gtfn_imperative]:
         pytest.skip("Tuple arguments are not supported in gtfn yet.")
+    if fieldview_backend == dace_iterator.run_dace_iterator:
+        pytest.skip("DaCe backend doesn't support tuples")
 
     size = 10
     inp = np_as_located_field(IDim)(np.ones((size)))
