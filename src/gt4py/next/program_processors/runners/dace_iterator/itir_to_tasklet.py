@@ -261,7 +261,11 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         else:
             value = node.value
         expr = str(value)
-        dtype = _TYPE_MAPPING[node.type]
+        dtype: np.dtype
+        if isinstance(node, itir.Literal):
+            dtype = _TYPE_MAPPING[node.type]
+        else:
+            dtype = dace.int64
         return self.add_expr_tasklet([], expr, dtype, "constant")
 
     def visit_Literal(self, node: itir.Literal, **kwargs) -> list[ValueExpr]:
