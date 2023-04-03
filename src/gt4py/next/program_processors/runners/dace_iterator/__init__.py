@@ -92,7 +92,7 @@ def run_dace_iterator(program: itir.FencilDefinition, *args, **kwargs) -> None:
     dace_shapes = get_shape_args(sdfg.arrays, dace_field_args)
     dace_conn_shapes = get_shape_args(sdfg.arrays, dace_conn_args)
     dace_strides = get_stride_args(sdfg.arrays, dace_field_args)
-    dace_conn_stirdes = get_stride_args(sdfg.arrays, dace_conn_args)
+    dace_conn_strides = get_stride_args(sdfg.arrays, dace_conn_args)
 
     with dace.config.temporary_config():
         dace.config.Config.set("compiler", "allow_view_arguments", value=True)
@@ -105,5 +105,5 @@ def run_dace_iterator(program: itir.FencilDefinition, *args, **kwargs) -> None:
             **dace_shapes,
             **dace_conn_shapes,
             **dace_strides,
-            **dace_conn_stirdes,
+            **dace_conn_strides,
         )

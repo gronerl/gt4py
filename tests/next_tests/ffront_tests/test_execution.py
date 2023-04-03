@@ -359,8 +359,6 @@ def test_astype_float(fieldview_backend):
 
 
 def test_offset_field(fieldview_backend):
-    if fieldview_backend == dace_iterator.run_dace_iterator:
-        pytest.skip("DaCe backend doesn't support tuples")
     a_I_arr = np.random.randn(size, size).astype("float64")
     a_I_float = np_as_located_field(IDim, KDim)(a_I_arr)
     a_I_float_1 = np_as_located_field(IDim, KDim)(
@@ -405,6 +403,8 @@ def test_offset_field(fieldview_backend):
 
 
 def test_nested_tuple_return(fieldview_backend):
+    if fieldview_backend == dace_iterator.run_dace_iterator:
+        pytest.skip("DaCe backend doesn't support tuples")
     a_I_float = np_as_located_field(IDim)(np.random.randn(size).astype("float64"))
     b_I_float = np_as_located_field(IDim)(np.random.randn(size).astype("float64"))
     out_I_float = np_as_located_field(IDim)(np.zeros((size), dtype=float64))
@@ -426,6 +426,8 @@ def test_nested_tuple_return(fieldview_backend):
 
 
 def test_nested_reduction(reduction_setup, fieldview_backend):
+    if fieldview_backend == dace_iterator.run_dace_iterator:
+        pytest.skip("DaCe backend doesn't support tuples")
     rs = reduction_setup
     Edge = rs.Edge
     Vertex = rs.Vertex

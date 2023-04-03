@@ -288,6 +288,8 @@ class ItirToSDFG(eve.NodeVisitor):
         fun_calls = eve.walk_values(node).if_isinstance(itir.FunCall)
         shifts = [nd for nd in fun_calls if getattr(nd.fun, "id", "") == "shift"]
         for shift in shifts:
-            if not all(isinstance(arg, (itir.Literal, itir.OffsetLiteral)) for arg in shift.args):
+            if not all(
+                isinstance(arg, (itir.Literal, itir.OffsetLiteral)) for arg in shift.args[::2]
+            ):
                 return False
         return True

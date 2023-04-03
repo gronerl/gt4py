@@ -229,11 +229,25 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
             return IteratorExpr(access_node, index)
         return ValueExpr(access_node)
 
-    def visit_Literal(self, node: itir.Literal, **kwargs) -> ValueExpr:
-        value = node.value
+    def _visit_any_literal(self, node: itir.Literal | itir.OffsetLiteral, **kwargs):
+        value: int | float
+        if isinstance(node.value, str):
+            if node.value.isnumeric():
+                value = int(node.value)
+            else:
+                value = float(node.value)
+        else:
+            value = node.value
         expr = str(value)
         dtype = dace.dtypes.float64 if np.dtype(type(value)).kind == "f" else dace.dtypes.int64
         return self.add_expr_tasklet([], expr, dtype, "constant")
+
+    def visit_Literal(self, node: itir.Literal, **kwargs) -> ValueExpr:
+        return self._visit_any_literal(node, **kwargs)
+
+    def visit_OffsetLiteral(self, node: itir.OffsetLiteral, **kwargs):
+        assert isinstance(node.value, int)
+        return self._visit_any_literal(node, **kwargs)
 
     def visit_FunCall(self, node: itir.FunCall, **kwargs) -> Any:
         if isinstance(node.fun, itir.SymRef) and node.fun.id == "deref":
@@ -277,17 +291,6 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         expr = f"{internals[0]}[{', '.join(internals[1:])}]"
         return self.add_expr_tasklet(list(zip(args, internals)), expr, dace.dtypes.float64, "deref")
 
-    def _split_shift_args(
-        self, args: list[itir.Expr]
-    ) -> tuple[list[itir.Expr], Optional[list[itir.Expr]]]:
-        idx = 1
-        for _ in range(idx, len(args)):
-            if not isinstance(args[idx], itir.OffsetLiteral):
-                idx += 1
-        head = args[0:idx]
-        rest = args[idx::] if idx < len(args) else None
-        return head, rest
-
     def _make_shift_for_rest(self, rest, iterator):
         return itir.FunCall(
             fun=itir.FunCall(fun=itir.SymRef(id="shift"), args=rest), args=[iterator]
@@ -298,18 +301,18 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         shift = node.fun
         assert isinstance(shift, itir.FunCall)
 
-        head, rest = self._split_shift_args(shift.args)
+        dim_arg, offset, *rest = shift.args
         if rest:
             iterator = self.visit(self._make_shift_for_rest(rest, node.args[0]))
         else:
             iterator = self.visit(node.args[0], hack_is_iterator=True)
 
-        assert isinstance(head[0], itir.OffsetLiteral)
-        offset = head[0].value
-        assert isinstance(offset, str)
-        shifted_dim = self.offset_provider[offset].value
+        assert isinstance(dim_arg, itir.OffsetLiteral)
+        dimension = dim_arg.value
+        assert isinstance(dimension, str)
+        shifted_dim = self.offset_provider[dimension].value
 
-        shift_amount = self.visit(head[1])
+        shift_amount = self.visit(offset)
 
         args = [ValueExpr(iterator.indices[shifted_dim]), shift_amount]
         internals = [f"{arg.value.data}_v" for arg in args]
@@ -326,25 +329,24 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
     def _visit_indirect_addressing(self, node: itir.FunCall, **kwargs) -> IteratorExpr:
         shift = node.fun
         assert isinstance(shift, itir.FunCall)
-        head, rest = self._split_shift_args(shift.args)
+
+        dim_arg, offset, *rest = shift.args
         if rest:
             iterator = self.visit(self._make_shift_for_rest(rest, node.args[0]))
         else:
             iterator = self.visit(node.args[0], hack_is_iterator=True)
 
-        if len(head) < 2:
-            raise NotImplementedError("reductions are not supported")
-        assert isinstance(head[0], itir.OffsetLiteral)
-        offset = head[0].value
-        assert isinstance(offset, str)
-        element = self.visit(head[1])
+        assert isinstance(dim_arg, itir.OffsetLiteral)
+        dimension = dim_arg.value
+        assert isinstance(dimension, str)
+        element = self.visit(offset)
 
-        table: NeighborTableOffsetProvider = self.offset_provider[offset]
+        table: NeighborTableOffsetProvider = self.offset_provider[dimension]
         shifted_dim = table.origin_axis.value
         target_dim = table.neighbor_axis.value
 
         assert self.entry_state is not None
-        conn = self.entry_state.add_access(connectivity_identifier(offset))
+        conn = self.entry_state.add_access(connectivity_identifier(dimension))
 
         args = [ValueExpr(conn), ValueExpr(iterator.indices[shifted_dim]), element]
         internals = [f"{arg.value.data}_v" for arg in args]
@@ -419,4 +421,6 @@ def closure_to_tasklet_sdfg(
         offset_provider, domain, input_args, output_args, connectivity_args
     )
     translator.visit(node.stencil)
+    translator.sdfg.view()
+    translator.sdfg.save("translator.sdfg")
     return translator.sdfg, translator.params, translator.results
