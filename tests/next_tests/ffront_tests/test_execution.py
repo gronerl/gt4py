@@ -635,6 +635,8 @@ def test_solve_triag(fieldview_backend):
 
 
 def test_ternary_operator(fieldview_backend):
+    if fieldview_backend == dace_iterator.run_dace_iterator:
+        pytest.skip("DaCe backend doesn't support broadcasts")
     a_I_float = np_as_located_field(IDim)(np.random.randn(size).astype("float64"))
     b_I_float = np_as_located_field(IDim)(np.random.randn(size).astype("float64"))
     out_I_float = np_as_located_field(IDim)(np.zeros((size), dtype=float64))
@@ -694,6 +696,8 @@ def test_ternary_operator_tuple(fieldview_backend):
 
 
 def test_ternary_builtin_neighbor_sum(reduction_setup, fieldview_backend):
+    if fieldview_backend == dace_iterator.run_dace_iterator:
+        pytest.skip("DaCe backend doesn't support reductions")
     rs = reduction_setup
     Edge = rs.Edge
     Vertex = rs.Vertex
@@ -724,6 +728,8 @@ def test_ternary_builtin_neighbor_sum(reduction_setup, fieldview_backend):
 
 
 def test_ternary_scan(fieldview_backend):
+    if fieldview_backend == dace_iterator.run_dace_iterator:
+        pytest.skip("DaCe backend doesn't support scans")
     init = 0.0
     a_float = 4
     a = np_as_located_field(KDim)(a_float * np.ones((size,)))
