@@ -17,6 +17,7 @@ from typing import Any
 import dace
 from dace.transformation.dataflow.redundant_array import RedundantArray, RedundantSecondArray
 from dace.transformation.dataflow.trivial_tasklet_elimination import TrivialTaskletElimination
+from dace.transformation.passes.scalar_to_symbol import ScalarToSymbolPromotion
 
 from gt4py.next.iterator.embedded import NeighborTableOffsetProvider
 from gt4py.next.type_system import type_specifications as ts
@@ -76,6 +77,10 @@ def create_memlet_full_to_at(
 
 
 def simplify_sdfg(sdfg: dace.SDFG, validate: bool = True, validate_all: bool = False):
+    s2s = ScalarToSymbolPromotion()
+    s2s.integers_only = False
+    s2s.apply_pass(sdfg, {})
+
     sdfg.apply_transformations_repeated(
         [TrivialTaskletElimination, RedundantArray, RedundantSecondArray],
         validate=False,

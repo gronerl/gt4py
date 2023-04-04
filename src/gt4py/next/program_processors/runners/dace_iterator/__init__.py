@@ -18,6 +18,7 @@ import dace
 import numpy as np
 
 import gt4py.next.iterator.ir as itir
+import gt4py.next.iterator.type_inference as ti
 from gt4py.next.iterator.embedded import LocatedField, NeighborTableOffsetProvider
 from gt4py.next.iterator.transforms import apply_common_transforms, inline_lambdas
 from gt4py.next.program_processors.processor_interface import program_executor
@@ -82,8 +83,12 @@ def run_dace_iterator(program: itir.FencilDefinition, *args, **kwargs) -> None:
     neighbor_tables = filter_neighbor_tables(offset_provider)
 
     program = preprocess_program(program, offset_provider)
+
+    node_types = ti.infer_all(program)
     arg_types = [type_translation.from_value(arg) for arg in args]
-    sdfg_genenerator = ItirToSDFG(param_types=arg_types, offset_provider=offset_provider)
+    sdfg_genenerator = ItirToSDFG(
+        param_types=arg_types, offset_provider=offset_provider, node_types=node_types
+    )
     sdfg: dace.SDFG = sdfg_genenerator.visit(program)
 
     dace_args = get_args(program.params, args)

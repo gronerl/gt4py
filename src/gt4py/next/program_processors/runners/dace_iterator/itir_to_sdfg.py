@@ -21,6 +21,7 @@ import gt4py.eve as eve
 from gt4py.next.common import Dimension, DimensionKind
 from gt4py.next.iterator import ir as itir
 from gt4py.next.iterator.embedded import NeighborTableOffsetProvider
+from gt4py.next.type_inference import Type
 from gt4py.next.type_system import type_specifications as ts, type_translation
 
 from .itir_to_tasklet import ClosureArg, closure_to_tasklet_sdfg
@@ -42,9 +43,11 @@ class ItirToSDFG(eve.NodeVisitor):
         self,
         param_types: list[ts.TypeSpec],
         offset_provider: dict[str, NeighborTableOffsetProvider],
+        node_types: dict[int, Type],
     ):
         self.param_types = param_types
         self.offset_provider = offset_provider
+        self.node_types = node_types
 
     def add_storage(self, sdfg: dace.SDFG, name: str, type_: ts.TypeSpec):
         if isinstance(type_, ts.FieldType):
@@ -165,6 +168,7 @@ class ItirToSDFG(eve.NodeVisitor):
             [self._closure_arg_from_memlet(closure_sdfg, arg) for arg in input_args],
             [self._closure_arg_from_memlet(closure_sdfg, arg) for arg in output_args],
             [self._closure_arg_from_memlet(closure_sdfg, arg) for arg in conn_args],
+            self.node_types,
         )
 
         # Map SDFG tasklet arguments to parameters

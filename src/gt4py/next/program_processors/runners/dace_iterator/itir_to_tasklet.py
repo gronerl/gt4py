@@ -24,6 +24,7 @@ import gt4py.eve.codegen
 from gt4py.next.common import Dimension
 from gt4py.next.iterator import ir as itir
 from gt4py.next.iterator.embedded import NeighborTableOffsetProvider
+from gt4py.next.type_inference import Type
 
 from .utility import (
     connectivity_identifier,
@@ -132,7 +133,7 @@ def builtin_cast(
     assert isinstance(target_type, itir.SymRef)
     expr = _MATH_BUILTINS_MAPPING[target_type.id].format(*internals)
     return transformer.add_expr_tasklet(
-        list(zip(args, internals)), expr, dace.dtypes.float64, "cast"
+        list(zip(args, internals)), expr, _TYPE_MAPPING[str(target_type)], "cast"
     )
 
 
@@ -185,6 +186,7 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         input_args: Sequence[ClosureArg],
         output_args: Sequence[ClosureArg],
         conn_args: Sequence[ClosureArg],
+        node_types: dict[int, Type],
     ):
         self.sdfg = None
         self.entry_state = None
@@ -193,6 +195,17 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         self.input_args = input_args
         self.output_args = output_args
         self.conn_args = conn_args
+        self.node_types = node_types
+
+    def get_node_dtype(self, node):
+        if isinstance(node, itir.OffsetLiteral):
+            return _TYPE_MAPPING["int64"]
+        elif id(node) not in self.node_types:
+            # offset expression,
+            # bug in type inference, will be fixed b Till
+            return _TYPE_MAPPING["int64"]
+        typestr = self.node_types[id(node)].dtype.name
+        return _TYPE_MAPPING[typestr]
 
     def visit_FunctionDefinition(self, node: itir.FunctionDefinition, **kwargs):
         raise NotImplementedError()
@@ -244,7 +257,7 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         if hack_is_iterator:
             index = {}
             for dim, idx in self.domain.items():
-                index[dim] = self.add_expr_tasklet([], idx, dace.dtypes.int64, idx)[0].value
+                index[dim] = self.add_expr_tasklet([], idx, dace.int64, idx)[0].value
                 assert self.sdfg is not None
                 if str(idx) not in self.sdfg.symbols:
                     self.sdfg.add_symbol(idx, stype=dace.int64)
@@ -261,11 +274,7 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         else:
             value = node.value
         expr = str(value)
-        dtype: np.dtype
-        if isinstance(node, itir.Literal):
-            dtype = _TYPE_MAPPING[node.type]
-        else:
-            dtype = dace.int64
+        dtype = self.get_node_dtype(node)
         return self.add_expr_tasklet([], expr, dtype, "constant")
 
     def visit_Literal(self, node: itir.Literal, **kwargs) -> list[ValueExpr]:
@@ -315,12 +324,15 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         args: list[ValueExpr] = [ValueExpr(iterator.field), *flat_index]
         internals = [f"{arg.value.data}_v" for arg in args]
         expr = f"{internals[0]}[{', '.join(internals[1:])}]"
-        return self.add_expr_tasklet(list(zip(args, internals)), expr, dace.dtypes.float64, "deref")
+        dtype = self.get_node_dtype(node)
+        return self.add_expr_tasklet(list(zip(args, internals)), expr, dtype, "deref")
 
-    def _make_shift_for_rest(self, rest, iterator):
-        return itir.FunCall(
-            fun=itir.FunCall(fun=itir.SymRef(id="shift"), args=rest), args=[iterator]
-        )
+    def _make_shift_for_rest(self, shift, rest, iterator):
+        shift_operator = itir.FunCall(fun=itir.SymRef(id="shift"), args=rest)
+        self.node_types[id(shift_operator)] = self.node_types[id(shift)]
+        shift_call = itir.FunCall(fun=shift_operator, args=[iterator])
+        self.node_types[id(shift_call)] = self.node_types[id(iterator)]
+        return shift_call
 
     def _visit_direct_addressing(self, node: itir.FunCall, **kwargs) -> IteratorExpr:
         assert isinstance(node.fun, itir.FunCall)
@@ -329,7 +341,7 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
 
         dim_arg, offset, *rest = shift.args
         if rest:
-            iterator = self.visit(self._make_shift_for_rest(rest, node.args[0]))
+            iterator = self.visit(self._make_shift_for_rest(shift, rest, node.args[0]))
         else:
             iterator = self.visit(node.args[0], hack_is_iterator=True)
 
@@ -358,7 +370,7 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
 
         dim_arg, offset, *rest = shift.args
         if rest:
-            iterator = self.visit(self._make_shift_for_rest(rest, node.args[0]))
+            iterator = self.visit(self._make_shift_for_rest(shift, rest, node.args[0]))
         else:
             iterator = self.visit(node.args[0], hack_is_iterator=True)
 
@@ -393,9 +405,8 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         args: list[ValueExpr] = list(itertools.chain(*[self.visit(arg) for arg in node.args]))
         internals = [f"{arg.value.data}_v" for arg in args]
         expr = fmt.format(*internals)
-        return self.add_expr_tasklet(
-            list(zip(args, internals)), expr, dace.dtypes.float64, "numeric"
-        )
+        dtype = self.get_node_dtype(node)
+        return self.add_expr_tasklet(list(zip(args, internals)), expr, dtype, "numeric")
 
     def _visit_general_builtin(self, node: itir.FunCall, **kwargs) -> list[ValueExpr]:
         assert isinstance(node.fun, itir.SymRef)
@@ -442,9 +453,10 @@ def closure_to_tasklet_sdfg(
     input_args: Sequence[ClosureArg],
     output_args: Sequence[ClosureArg],
     connectivity_args: Sequence[ClosureArg],
+    node_types,
 ) -> tuple[dace.SDFG, list[str], list[str]]:
     translator = PythonTaskletCodegen(
-        offset_provider, domain, input_args, output_args, connectivity_args
+        offset_provider, domain, input_args, output_args, connectivity_args, node_types
     )
     translator.visit(node.stencil)
     simplify_sdfg(translator.sdfg)
