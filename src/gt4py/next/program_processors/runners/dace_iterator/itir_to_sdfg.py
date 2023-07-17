@@ -191,6 +191,7 @@ class ItirToSDFG(eve.NodeVisitor):
         # Create the closure's nested SDFG and single state.
         closure_sdfg = dace.SDFG(name="closure")
         closure_state = closure_sdfg.add_state("closure_entry")
+        closure_init_state = closure_sdfg.add_state_before(closure_state, "closure_init")
 
         # Add DaCe arrays for inputs, output and connectivities to closure SDFG.
         for name in [*input_names, *conn_names, output_name]:
@@ -210,15 +211,33 @@ class ItirToSDFG(eve.NodeVisitor):
         program_arg_syms: dict[str, ValueExpr | IteratorExpr] = {}
         for name, type_ in self.storages.items():
             if isinstance(type_, ts.ScalarType):
-                program_arg_syms[name] = SymbolExpr(name, as_dace_type(type_))
+                if name in input_names:
+                    dtype = as_dace_type(type_)
+                    closure_sdfg.add_symbol(name, dtype)
+                    out_name = unique_var_name()
+                    closure_sdfg.add_scalar(out_name, dtype, transient=True)
+                    out_tasklet = closure_init_state.add_tasklet(
+                        f"get_{name}", {}, {"__result"}, f"__result = {name}"
+                    )
+                    access = closure_init_state.add_access(out_name)
+                    value = ValueExpr(access, dtype)
+                    memlet = create_memlet_at(out_name, ("0",))
+                    closure_init_state.add_edge(out_tasklet, "__result", access, None, memlet)
+                    program_arg_syms[name] = value
+                else:
+                    program_arg_syms[name] = SymbolExpr(name, as_dace_type(type_))
         domain_ctx = Context(closure_sdfg, closure_state, program_arg_syms)
         closure_domain = self._visit_domain(node.domain, domain_ctx)
 
         # Map SDFG tasklet arguments to parameters
         input_memlets = [
             create_memlet_full(name, closure_sdfg.arrays[name])
-            for name in input_names
-            if isinstance(self.storages[name], ts.FieldType)
+            for name in map(
+                lambda x: x
+                if isinstance(self.storages[x], ts.FieldType)
+                else cast(ValueExpr, program_arg_syms[x]).value.data,
+                input_names,
+            )
         ]
         conn_memlet = [create_memlet_full(name, closure_sdfg.arrays[name]) for name in conn_names]
 
@@ -409,8 +428,8 @@ class ItirToSDFG(eve.NodeVisitor):
                     dtype=array_table[name].dtype,
                 )
             else:
-                scan_sdfg.add_symbol(
-                    name, stype=as_dace_type(cast(ts.ScalarType, self.storages[name]))
+                scan_sdfg.add_scalar(
+                    name, dtype=as_dace_type(cast(ts.ScalarType, self.storages[name]))
                 )
 
         # implement the lambda closure as a nested SDFG that computes a single item of the map domain
@@ -472,14 +491,13 @@ class ItirToSDFG(eve.NodeVisitor):
                     dst_conn=inner_name,
                 )
             else:
-                # lambda_state.add_memlet_path(
-                #     lambda_state.add_access(data_name),
-                #     scan_inner_node,
-                #     memlet=dace.Memlet(data=f"{data_name}", subset="0"),
-                #     src_conn=None,
-                #     dst_conn=connector_name,
-                # )
-                scan_inner_node.symbol_mapping[inner_name] = data_name
+                lambda_state.add_memlet_path(
+                    lambda_state.add_access(data_name),
+                    scan_inner_node,
+                    memlet=dace.Memlet(data=f"{data_name}", subset="0"),
+                    src_conn=None,
+                    dst_conn=inner_name,
+                )
 
         output_names = [output_name]
         assert len(lambda_outputs) == 1

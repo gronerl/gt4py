@@ -245,12 +245,10 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         context_sdfg = dace.SDFG(func_name)
         context_state = context_sdfg.add_state(f"{func_name}_entry", True)
         symbol_map = {}
-        value: ValueExpr | IteratorExpr | SymbolExpr
+        value: ValueExpr | IteratorExpr
         for param, arg in symbols.items():
             if isinstance(arg, ValueExpr):
                 value = ValueExpr(context_state.add_access(param), arg.dtype)
-            elif isinstance(arg, SymbolExpr):
-                value = arg
             else:
                 assert isinstance(arg, IteratorExpr)
                 field = context_state.add_access(param)
@@ -264,17 +262,11 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         self.context = context
 
         # Add input parameters as arrays
-        inputs: list[
-            tuple[str, ValueExpr | SymbolExpr] | tuple[tuple[str, dict], IteratorExpr]
-        ] = []
+        inputs: list[tuple[str, ValueExpr] | tuple[tuple[str, dict], IteratorExpr]] = []
         for name, arg in symbols.items():
             if isinstance(arg, ValueExpr):
                 dtype = arg.dtype
                 context.body.add_scalar(name, dtype=dtype)
-                inputs.append((name, arg))
-            elif isinstance(arg, SymbolExpr):
-                dtype = arg.dtype
-                context.body.add_symbol(name, stype=dtype)
                 inputs.append((name, arg))
             else:
                 assert isinstance(arg, IteratorExpr)
