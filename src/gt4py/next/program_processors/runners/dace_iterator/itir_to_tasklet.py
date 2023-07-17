@@ -110,6 +110,12 @@ _MATH_BUILTINS_MAPPING = {
 
 
 @dataclasses.dataclass
+class SymbolExpr:
+    value: str | dace.symbolic.sympy.Basic
+    dtype: dace.typeclass
+
+
+@dataclasses.dataclass
 class ValueExpr:
     value: dace.nodes.AccessNode
     dtype: dace.typeclass
@@ -206,7 +212,7 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         raise NotImplementedError()
 
     def visit_Lambda(
-        self, node: itir.Lambda, args: Sequence[ValueExpr | IteratorExpr]
+        self, node: itir.Lambda, args: Sequence[ValueExpr | SymbolExpr]
     ) -> tuple[
         Context,
         list[tuple[str, ValueExpr] | tuple[tuple[str, dict], IteratorExpr]],
@@ -217,20 +223,34 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         param_names = [str(p.id) for p in node.params]
         conn_names = [connectivity_identifier(offset) for offset, _ in neighbor_tables]
 
+        # {param: ValueExpr(value=self.context.state.add_access(param), dtype=itir_type_as_dace_type(atype.dtype)) for
+        #  param, atype in zip(param_names, args_types)}
+        # symbols = {}
+        assert len(param_names) == len(args)
         symbols = {
             **{param: arg for param, arg in zip(param_names, args)},
-            **self.context.symbol_map,
+            # ** self.context.symbol_map,
         }
+
+        # for param, atype in zip(param_names, args):
+        #     if isinstance(atype, SymbolExpr):
+        #         symbols[param] = SymbolExpr(value=param, dtype=atype.dtype)
+        #     else:
+        #         assert isinstance(atype, ValueExpr)
+        #         symbols[param] = ValueExpr(value=self.context.state.add_access(param), dtype=atype.dtype)
+        # symbols.update(self.context.symbol_map)
 
         # Create the SDFG for the function's body
         prev_context = self.context
         context_sdfg = dace.SDFG(func_name)
         context_state = context_sdfg.add_state(f"{func_name}_entry", True)
         symbol_map = {}
-        value: ValueExpr | IteratorExpr
+        value: ValueExpr | IteratorExpr | SymbolExpr
         for param, arg in symbols.items():
             if isinstance(arg, ValueExpr):
                 value = ValueExpr(context_state.add_access(param), arg.dtype)
+            elif isinstance(arg, SymbolExpr):
+                value = arg
             else:
                 assert isinstance(arg, IteratorExpr)
                 field = context_state.add_access(param)
@@ -244,11 +264,17 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         self.context = context
 
         # Add input parameters as arrays
-        inputs: list[tuple[str, ValueExpr] | tuple[tuple[str, dict], IteratorExpr]] = []
+        inputs: list[
+            tuple[str, ValueExpr | SymbolExpr] | tuple[tuple[str, dict], IteratorExpr]
+        ] = []
         for name, arg in symbols.items():
             if isinstance(arg, ValueExpr):
                 dtype = arg.dtype
                 context.body.add_scalar(name, dtype=dtype)
+                inputs.append((name, arg))
+            elif isinstance(arg, SymbolExpr):
+                dtype = arg.dtype
+                context.body.add_symbol(name, stype=dtype)
                 inputs.append((name, arg))
             else:
                 assert isinstance(arg, IteratorExpr)
@@ -294,17 +320,20 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
         return context, inputs, [result]
 
     def visit_SymRef(self, node: itir.SymRef) -> list[ValueExpr] | IteratorExpr:
-        assert node.id in self.context.symbol_map
+        if node.id not in self.context.symbol_map:
+            acc = self.context.state.add_access(node.id)
+            self.context.symbol_map[node.id] = ValueExpr(value=acc, dtype=dace.float64)
         value = self.context.symbol_map[node.id]
-        if isinstance(value, ValueExpr):
+        if isinstance(value, (ValueExpr, SymbolExpr)):
             return [value]
         return value
 
-    def visit_Literal(self, node: itir.Literal) -> list[ValueExpr]:
-        value = node.value
-        expr = str(value)
-        dtype = _TYPE_MAPPING[node.type]
-        return self.add_expr_tasklet([], expr, dtype, "constant")
+    def visit_Literal(self, node: itir.Literal) -> list[SymbolExpr]:
+        return [SymbolExpr(node.value, self.node_types[id(node)].dtype)]
+        # value = node.value
+        # expr = str(value)
+        # dtype = _TYPE_MAPPING[node.type]
+        # return self.add_expr_tasklet([], expr, dtype, "constant")
 
     def visit_FunCall(self, node: itir.FunCall) -> list[ValueExpr] | IteratorExpr:
         if isinstance(node.fun, itir.SymRef) and node.fun.id == "deref":
@@ -507,13 +536,20 @@ class PythonTaskletCodegen(gt4py.eve.codegen.TemplatedGenerator):
     def _visit_numeric_builtin(self, node: itir.FunCall) -> list[ValueExpr]:
         assert isinstance(node.fun, itir.SymRef)
         fmt = _MATH_BUILTINS_MAPPING[str(node.fun.id)]
-        args: list[ValueExpr] = list(itertools.chain(*[self.visit(arg) for arg in node.args]))
-        internals = [f"{arg.value.data}_v" for arg in args]
+        args: list[SymbolExpr | ValueExpr] = list(
+            itertools.chain(*[self.visit(arg) for arg in node.args])
+        )
+        internals = [
+            arg.value if isinstance(arg, SymbolExpr) else f"{arg.value.data}_v" for arg in args
+        ]
         expr = fmt.format(*internals)
         node_type = self.node_types[id(node)]
         assert isinstance(node_type, itir_typing.Val)
         type_ = itir_type_as_dace_type(node_type.dtype)
-        return self.add_expr_tasklet(list(zip(args, internals)), expr, type_, "numeric")
+        arg_pairs = [
+            (arg, param) for arg, param in zip(args, internals) if not isinstance(arg, SymbolExpr)
+        ]
+        return self.add_expr_tasklet(arg_pairs, expr, type_, "numeric")
 
     def _visit_general_builtin(self, node: itir.FunCall) -> list[ValueExpr]:
         assert isinstance(node.fun, itir.SymRef)
@@ -605,6 +641,7 @@ def lambda_to_tasklet_sdfg(
     node: itir.StencilClosure,
     offset_provider: dict[str, Any],
     node_types: dict[int, next_typing.Type],
+    # args_types: list[ts.TypeSpec]
 ) -> tuple[Context, Sequence[tuple[str, ValueExpr]], list[ValueExpr]]:
     body = dace.SDFG("tasklet_toplevel")
     state = body.add_state("tasklet_toplevel_entry")
@@ -620,12 +657,13 @@ def lambda_to_tasklet_sdfg(
     funobj = itir.Lambda(expr=get_lambda().expr, params=get_lambda().params)
     translator = PythonTaskletCodegen(offset_provider, context, node_types)
 
-    # add lambda parameters to symbol map
-    for p in get_lambda().params:
-        pnode = state.add_access(p.id)
-        symbol_map[p.id] = ValueExpr(value=pnode.data, dtype=dace.float64)
+    # # add lambda parameters to symbol map
+    # for p in get_lambda().params:
+    #     pnode = state.add_access(p.id)
+    #     symbol_map[p.id] = ValueExpr(value=pnode.data, dtype=dace.float64)
 
-    context, inputs, outputs = translator.visit(funobj, args={})
+    args = list(itertools.chain(translator.visit(node.output), *translator.visit(node.inputs)))
+    context, inputs, outputs = translator.visit(funobj, args=args)
 
     for output in outputs:
         context.body.arrays[output.value.data].transient = True
