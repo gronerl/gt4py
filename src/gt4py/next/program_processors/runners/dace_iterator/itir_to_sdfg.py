@@ -191,7 +191,6 @@ class ItirToSDFG(eve.NodeVisitor):
         # Create the closure's nested SDFG and single state.
         closure_sdfg = dace.SDFG(name="closure")
         closure_state = closure_sdfg.add_state("closure_entry")
-        closure_init_state = closure_sdfg.add_state_before(closure_state, "closure_init")
 
         # Add DaCe arrays for inputs, output and connectivities to closure SDFG.
         for name in [*input_names, *conn_names, output_name]:
@@ -424,9 +423,9 @@ class ItirToSDFG(eve.NodeVisitor):
         )
 
         input_connectors = {
-            str(inner_name)
+            inner_name
             for inner_name, expr in lambda_inputs
-            if not isinstance(expr, SymbolExpr)
+            if inner_name not in scan_sdfg.symbols
         }
         scan_inner_node = lambda_state.add_nested_sdfg(
             lambda_context.body,
