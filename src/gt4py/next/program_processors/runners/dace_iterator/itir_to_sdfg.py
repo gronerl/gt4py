@@ -208,7 +208,7 @@ class ItirToSDFG(eve.NodeVisitor):
                 )
 
         # Get output domain of the closure
-        program_arg_syms: dict[str, ValueExpr | IteratorExpr] = {}
+        program_arg_syms: dict[str, ValueExpr | IteratorExpr | SymbolExpr] = {}
         for name, type_ in self.storages.items():
             if isinstance(type_, ts.ScalarType):
                 if name in input_names:
@@ -341,16 +341,6 @@ class ItirToSDFG(eve.NodeVisitor):
             closure_state.remove_edge(edge)
             access_nodes[memlet.data].data = transient_to_arg_name_mapping[memlet.data]
 
-        # for _, (lb, ub) in closure_domain:
-        #     map_entry.add_in_connector(lb.value.data)
-        #     map_entry.add_in_connector(ub.value.data)
-        #     closure_state.add_edge(
-        #         lb.value, None, map_entry, lb.value.data, create_memlet_at(lb.value.data, ("0",))
-        #     )
-        #     closure_state.add_edge(
-        #         ub.value, None, map_entry, ub.value.data, create_memlet_at(ub.value.data, ("0",))
-        #     )
-
         return closure_sdfg
 
     def _visit_scan_stencil_closure(
@@ -433,18 +423,14 @@ class ItirToSDFG(eve.NodeVisitor):
                 )
 
         # implement the lambda closure as a nested SDFG that computes a single item of the map domain
-        # args = [self.storages[p.id] for p in [node.output]+node.inputs]
         lambda_context, lambda_inputs, lambda_outputs = lambda_to_tasklet_sdfg(
             node,
             self.offset_provider,
             self.node_types,
-            # args
         )
 
         input_connectors = {
-            inner_name
-            for inner_name, expr in lambda_inputs
-            if inner_name not in scan_sdfg.symbols
+            inner_name for inner_name, expr in lambda_inputs if inner_name not in scan_sdfg.symbols
         }
         scan_inner_node = lambda_state.add_nested_sdfg(
             lambda_context.body,
